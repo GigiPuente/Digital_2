@@ -33,7 +33,7 @@
 #define TRANSISTOR_J2 PB5
 
 //Meta de la carrera
-#define META 0b00001000
+#define META 10
 
 //Variables para empezar
 volatile uint8_t jugadores_habilitados = 0;
@@ -42,8 +42,8 @@ volatile uint8_t numero_conteo = 0;
 volatile uint8_t tiempo_timer = 0;
 
 //Guardar conteos
-static uint8_t leds_J1 = 0;
-static uint8_t leds_J2 = 0;
+static uint8_t decadas_J1 = 0;
+static uint8_t decadas_J2 = 0;
 
 //Estados de botones
 static uint8_t estado_J1 = 1;
@@ -70,7 +70,6 @@ static void actualizar_leds(void);
 static void mostrar_leds(uint8_t numero);
 static void revisar_ganador(void);
 static void mostrar_ganador(void);
-static uint8_t siguiente_led(uint8_t valor_actual);
 
 /****************************************/
 // Main Function
@@ -158,8 +157,8 @@ static void iniciar_conteo(void)
     numero_conteo = 5;
     tiempo_timer = 0;
     ganador = 0;
-    leds_J1 = 0;
-    leds_J2 = 0;
+    decadas_J1 = 0;
+    decadas_J2 = 0;
     estado_J1 = 1;
     estado_J2 = 1;
     rebote_J1 = 0;
@@ -192,7 +191,7 @@ static void rutina_J1(void)
             rebote_J1 = 0;
 
             if (estado_J1 == 0) {
-                leds_J1 = siguiente_led(leds_J1);
+                decadas_J1++;
             }
         }
     } else {
@@ -221,7 +220,7 @@ static void rutina_J2(void)
             rebote_J2 = 0;
 
             if (estado_J2 == 0) {
-                leds_J2 = siguiente_led(leds_J2);
+                decadas_J2++;
             }
         }
     } else {
@@ -229,23 +228,41 @@ static void rutina_J2(void)
     }
 }
 
+static void revisar_ganador(void)
+{
+    //Revisar si alguien llego primero a la meta
+    if (ganador != 0) {
+        return;
+    }
+
+    if (decadas_J1 >= META) {
+        ganador = 1;
+        jugadores_habilitados = 0;
+        mostrar_ganador();
+    } else if (decadas_J2 >= META) {
+        ganador = 2;
+        jugadores_habilitados = 0;
+        mostrar_ganador();
+    }
+}
+
 static void actualizar_leds(void)
 {
-    //Si ya hay ganador, deja solo su lado encendido
+    //Encender LEDs del ganador
     if (ganador != 0) {
         mostrar_ganador();
         return;
     }
 
-    //Apaga ambos jugadores antes de cambiar
+    //Apaga los dos jugadores antes de cambiar
     PORTB &= (uint8_t)~((1 << TRANSISTOR_J1) | (1 << TRANSISTOR_J2));
 
     if (jugador_led == 0) {
-        mostrar_leds(leds_J1);
+        mostrar_leds(decadas_J1);
         PORTB |= (1 << TRANSISTOR_J1);
         jugador_led = 1;
     } else {
-        mostrar_leds(leds_J2);
+        mostrar_leds(decadas_J2);
         PORTB |= (1 << TRANSISTOR_J2);
         jugador_led = 0;
     }
@@ -256,30 +273,15 @@ static void actualizar_leds(void)
 
 static void mostrar_leds(uint8_t numero)
 {
-    PORTB = (PORTB & 0b11110000) | numero;
-}
+    uint8_t salida = 0;
 
-static void revisar_ganador(void)
-{
-    //Revisar si alguien llego primero a la meta
-    if (ganador != 0) {
-        return;
-    }
-
-    if (leds_J1 == META) {
-        ganador = 1;
-        jugadores_habilitados = 0;
-        mostrar_ganador();
-    } else if (leds_J2 == META) {
-        ganador = 2;
-        jugadores_habilitados = 0;
-        mostrar_ganador();
-    }
+    salida = numero & 0x0F;
+    PORTB = (PORTB & 0b11110000) | salida;
 }
 
 static void mostrar_ganador(void)
 {
-    //Muestra el jugador ganador en display
+    //Número del ganador en el display
     if (ganador == 1) {
         mostrar_numero(1);
         PORTB = 0b00011111;
@@ -289,41 +291,20 @@ static void mostrar_ganador(void)
     }
 }
 
-static uint8_t siguiente_led(uint8_t valor_actual)
-{
-    if (valor_actual == 0b00000000) {
-        return 0b00000001;
-    }
-
-    if (valor_actual == 0b00000001) {
-        return 0b00000010;
-    }
-
-    if (valor_actual == 0b00000010) {
-        return 0b00000100;
-    }
-
-    if (valor_actual == 0b00000100) {
-        return 0b00001000;
-    }
-
-    return 0b00001000;
-}
-
 /****************************************/
 // Interrupt routines
 
 ISR(TIMER1_COMPA_vect)
 {
-    //Si no hay conteo, no hace nada
+    //No hacer nada sin conteo
     if (!conteo_activo) {
         return;
     }
 
-    //Contar las llamadas del timer
+    //Contar timer
     tiempo_timer++;
 
-    //Esperar a que pase 1 segundo
+    //Esperar 1s
     if (tiempo_timer < 10) {
         return;
     }
@@ -336,7 +317,7 @@ ISR(TIMER1_COMPA_vect)
         mostrar_numero(numero_conteo);
     }
 
-    //Al 0, habilitar a todos
+    //0, habilitar a todos
     if (numero_conteo == 0) {
         conteo_activo = 0;
         jugadores_habilitados = 1;

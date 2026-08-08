@@ -1,14 +1,20 @@
 /*
  * main.c
- * 
- * Funciones:
- *  - Boton: alterna encendido/apagado del motor DC.
- *  - Proximidad: espera 10 s, mueve servo a 90°, espera 1 s y vuelve a 0°.
- *  - APDS-9960 I2C: rojo -> stepper en una dirección; azul -> dirección opuesta.
- *    El movimiento ocurre 5 s después de detectar el color, gira 90°, espera
- *    1 s y regresa la misma cantidad de pasos.
- *  - HX711: lectura periódica del valor bruto de la celda de carga.
  *
+ * Esclavo I2C con todos los sensores y motores.
+ * El maestro externo lee estados por A4 (SDA) y A5 (SCL).
+ *
+ * Registros I2C:
+ * 0  motor DC ON/OFF
+ * 1  proximidad activa
+ * 2  estado del servo
+ * 3  angulo del servo
+ * 4  ultimo color detectado
+ * 5  estado del stepper
+ * 6  HX711 byte 3 (MSB)
+ * 7  HX711 byte 2
+ * 8  HX711 byte 1
+ * 9  HX711 byte 0 (LSB)
  */
 
 #ifndef F_CPU
@@ -22,78 +28,135 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-/* --------------------------------------------------------------------------
- * Asignación de pines del Arduino Nano
- * -------------------------------------------------------------------------- */
+#define PROX_BIT          PD2
+#define BUTTON_BIT        PD3
+#define HX_DOUT_BIT       PD4
+#define HX_SCK_BIT        PD5
+#define DC_MOTOR_BIT      PD6
+#define STEPPER_STEP_BIT  PD7
 
-/* Puerto D */
-#define PROX_BIT        PD2     /* D2  - sensor de proximidad */
-#define BUTTON_BIT      PD3     /* D3  - botón a GND */
-#define HX_DOUT_BIT     PD4     /* D4  - HX711 DOUT */
-#define HX_SCK_BIT      PD5     /* D5  - HX711 SCK */
-#define DC_MOTOR_BIT    PD6     /* D6  - compuerta MOSFET del motor DC */
-#define STEPPER_STEP_BIT PD7    /* D7  - STEP del A4988 */
-
-/* Puerto B */
-#define STEPPER_DIR_BIT PB0     /* D8  - DIR del A4988 */
-#define SERVO_BIT       PB1     /* D9  - OC1A, señal del servo */
-#define STEPPER_EN_BIT  PB2     /* D10 - ENABLE del A4988, activo en bajo */
-
-/* I2C del ATmega328P:
- * A4 = PC4 = SDA
- * A5 = PC5 = SCL
- */
-
-/* --------------------------------------------------------------------------
- * Parámetros ajustables
- * -------------------------------------------------------------------------- */
+#define STEPPER_DIR_BIT   PB0
+#define SERVO_BIT         PB1
+#define STEPPER_EN_BIT    PB2
 
 #define PROX_ACTIVE_LOW             1
-
 #define SERVO_WAIT_MS               10000UL
 #define SERVO_HOLD_MS               1000UL
-
 #define STEPPER_WAIT_MS             5000UL
 #define STEPPER_HOLD_MS             1000UL
 #define STEPPER_HALF_PERIOD_MS      2UL
-
-/* Motor típico: 200 pasos/vuelta = 1.8 grados/paso.
- * Si MS1, MS2 y MS3 están en LOW, use 1.
- * Si están en HIGH para 1/16 de paso, cambie a 16.
- */
-#define STEPPER_FULL_STEPS_REV       200UL
-#define STEPPER_MICROSTEPS           1UL
+#define STEPPER_FULL_STEPS_REV      200UL
+#define STEPPER_MICROSTEPS          1UL
 #define STEPPER_STEPS_90 \
     ((STEPPER_FULL_STEPS_REV * STEPPER_MICROSTEPS) / 4UL)
 
-#define RED_DIR_LEVEL                1
-#define STEPPER_DISABLE_AT_HOME      1
+#define RED_DIR_LEVEL               1
+#define STEPPER_DISABLE_AT_HOME     1
 
-#define COLOR_SAMPLE_MS              150UL
-#define COLOR_MIN_CLEAR              150U
-#define COLOR_DOMINANCE_PERCENT      125UL
-#define COLOR_REARM_SAMPLES          3U
+#define COLOR_SAMPLE_MS             150UL
+#define COLOR_MIN_CLEAR             150U
+#define COLOR_DOMINANCE_PERCENT     125UL
+#define COLOR_REARM_SAMPLES         3U
 
-#define WEIGHT_SAMPLE_MS             250UL
+#define WEIGHT_SAMPLE_MS            250UL
+#define HX711_OFFSET                0L
+#define HX711_COUNTS_PER_GRAM       0L
 
-/* Calibración HX711:
- * 1. Deje HX711_COUNTS_PER_GRAM en 0 para imprimir solamente el valor bruto.
- * 2. HX711_OFFSET debe ser el valor bruto con la plataforma vacía.
- * 3. HX711_COUNTS_PER_GRAM =
- *       (lectura_con_peso - HX711_OFFSET) / gramos_conocidos
- */
-#define HX711_OFFSET                 0L
-#define HX711_COUNTS_PER_GRAM        0L
+#define I2C_SLAVE_ADDRESS           0x12U
 
-/* --------------------------------------------------------------------------
- * Tiempo del sistema: Timer0 genera una interrupción cada 1 ms
- * -------------------------------------------------------------------------- */
+#define TWI_START_STATUS            0x08U
+#define TWI_REP_START_STATUS        0x10U
+#define TWI_MT_SLA_ACK_STATUS       0x18U
+#define TWI_MT_DATA_ACK_STATUS      0x28U
+#define TWI_MR_SLA_ACK_STATUS       0x40U
+#define TWI_MR_DATA_ACK_STATUS      0x50U
+#define TWI_MR_DATA_NACK_STATUS     0x58U
 
-static volatile uint32_t g_millis = 0;
+#define APDS9960_ADDR               0x39U
+#define APDS_ENABLE                 0x80U
+#define APDS_ATIME                  0x81U
+#define APDS_ID                     0x92U
+#define APDS_STATUS                 0x93U
+#define APDS_CDATAL                 0x94U
+#define APDS_CONTROL                0x8FU
+
+static volatile uint32_t g_millis = 0UL;
+static volatile uint8_t g_i2c_reg_pointer = 0U;
+static volatile uint8_t g_i2c_regs[10] = {0U};
+
+typedef struct {
+    uint8_t stable_state;
+    uint8_t last_raw_state;
+    uint32_t last_change_ms;
+} debounce_t;
+
+typedef enum {
+    SERVO_IDLE = 0,
+    SERVO_WAITING,
+    SERVO_AT_90
+} servo_state_t;
+
+typedef enum {
+    COLOR_NONE = 0,
+    COLOR_RED,
+    COLOR_BLUE
+} detected_color_t;
+
+typedef enum {
+    STEPPER_IDLE = 0,
+    STEPPER_WAITING,
+    STEPPER_MOVING_OUT,
+    STEPPER_HOLDING,
+    STEPPER_MOVING_HOME
+} stepper_state_t;
+
+static servo_state_t servo_state = SERVO_IDLE;
+static stepper_state_t stepper_state = STEPPER_IDLE;
+static detected_color_t stepper_color = COLOR_NONE;
+static detected_color_t last_color_detected = COLOR_NONE;
+
+static uint32_t servo_deadline_ms = 0UL;
+static uint32_t stepper_deadline_ms = 0UL;
+static uint32_t stepper_next_toggle_ms = 0UL;
+static uint32_t stepper_steps_done = 0UL;
+static uint8_t stepper_step_high = 0U;
+static uint8_t stepper_out_direction = 0U;
+static uint8_t servo_angle_deg = 0U;
+static int32_t last_weight_raw = 0L;
 
 ISR(TIMER0_COMPA_vect)
 {
     g_millis++;
+}
+
+ISR(TWI_vect)
+{
+    switch (TWSR & 0xF8U) {
+    case 0x60U:
+    case 0x68U:
+    case 0x70U:
+    case 0x78U:
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
+
+    case 0x80U:
+    case 0x90U:
+        g_i2c_reg_pointer = TWDR;
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
+
+    case 0xA8U:
+    case 0xB0U:
+    case 0xB8U:
+        TWDR = g_i2c_regs[g_i2c_reg_pointer % sizeof(g_i2c_regs)];
+        g_i2c_reg_pointer++;
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
+
+    default:
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
+    }
 }
 
 static uint32_t millis_get(void)
@@ -104,7 +167,6 @@ static uint32_t millis_get(void)
     cli();
     value = g_millis;
     SREG = old_sreg;
-
     return value;
 }
 
@@ -120,16 +182,11 @@ static bool interval_elapsed(uint32_t now, uint32_t previous, uint32_t interval)
 
 static void timer0_millis_init(void)
 {
-    /* 16 MHz / 64 = 250 kHz; 250 cuentas = 1 ms */
     TCCR0A = (1 << WGM01);
     TCCR0B = (1 << CS01) | (1 << CS00);
     OCR0A = 249;
     TIMSK0 = (1 << OCIE0A);
 }
-
-/* --------------------------------------------------------------------------
- * UART a 9600 bps para el monitor serial
- * -------------------------------------------------------------------------- */
 
 static void uart_init(void)
 {
@@ -143,8 +200,7 @@ static void uart_init(void)
 
 static void uart_putc(char c)
 {
-    while ((UCSR0A & (1 << UDRE0)) == 0) {
-        /* Esperar */
+    while ((UCSR0A & (1 << UDRE0)) == 0U) {
     }
     UDR0 = (uint8_t)c;
 }
@@ -161,20 +217,17 @@ static void uart_put_u32(uint32_t value)
     char buffer[11];
     uint8_t index = 0U;
 
-    /* Caso especial para cero */
     if (value == 0UL) {
         uart_putc('0');
         return;
     }
 
-    /* Guardar los dígitos en orden inverso */
     while ((value > 0UL) && (index < sizeof(buffer))) {
         buffer[index] = (char)('0' + (value % 10UL));
         value /= 10UL;
         index++;
     }
 
-    /* Enviarlos en el orden correcto */
     while (index > 0U) {
         index--;
         uart_putc(buffer[index]);
@@ -187,11 +240,6 @@ static void uart_put_i32(int32_t value)
 
     if (value < 0L) {
         uart_putc('-');
-
-        /*
-         * Esta expresión también funciona con INT32_MIN,
-         * evitando desbordamiento al calcular directamente -value.
-         */
         magnitude = (uint32_t)(-(value + 1L));
         magnitude += 1UL;
     } else {
@@ -206,21 +254,17 @@ static void uart_put_u16(uint16_t value)
     uart_put_u32((uint32_t)value);
 }
 
-/* --------------------------------------------------------------------------
- * GPIO
- * -------------------------------------------------------------------------- */
-
 static uint8_t button_pressed_raw(void)
 {
-    return ((PIND & (1 << BUTTON_BIT)) == 0);
+    return ((PIND & (1 << BUTTON_BIT)) == 0U);
 }
 
 static uint8_t proximity_active_raw(void)
 {
 #if PROX_ACTIVE_LOW
-    return ((PIND & (1 << PROX_BIT)) == 0);
+    return ((PIND & (1 << PROX_BIT)) == 0U);
 #else
-    return ((PIND & (1 << PROX_BIT)) != 0);
+    return ((PIND & (1 << PROX_BIT)) != 0U);
 #endif
 }
 
@@ -235,36 +279,16 @@ static void dc_motor_set(uint8_t enabled)
 
 static void gpio_init(void)
 {
-    /* Entradas */
     DDRD &= ~((1 << PROX_BIT) | (1 << BUTTON_BIT) | (1 << HX_DOUT_BIT));
-
-    /* Pull-up para botón y proximidad */
     PORTD |= (1 << BUTTON_BIT) | (1 << PROX_BIT);
 
-    /* Salidas del puerto D */
-    DDRD |= (1 << HX_SCK_BIT) |
-            (1 << DC_MOTOR_BIT) |
-            (1 << STEPPER_STEP_BIT);
+    DDRD |= (1 << HX_SCK_BIT) | (1 << DC_MOTOR_BIT) | (1 << STEPPER_STEP_BIT);
+    PORTD &= ~((1 << HX_SCK_BIT) | (1 << DC_MOTOR_BIT) | (1 << STEPPER_STEP_BIT));
 
-    PORTD &= ~((1 << HX_SCK_BIT) |
-               (1 << DC_MOTOR_BIT) |
-               (1 << STEPPER_STEP_BIT));
-
-    /* STEP DIR y ENABLE */
     DDRB |= (1 << STEPPER_DIR_BIT) | (1 << STEPPER_EN_BIT);
     PORTB &= ~(1 << STEPPER_DIR_BIT);
-    PORTB |= (1 << STEPPER_EN_BIT); /* A4988 deshabilitado al inicio */
+    PORTB |= (1 << STEPPER_EN_BIT);
 }
-
-/* --------------------------------------------------------------------------
- * Antirrebote
- * -------------------------------------------------------------------------- */
-
-typedef struct {
-    uint8_t stable_state;
-    uint8_t last_raw_state;
-    uint32_t last_change_ms;
-} debounce_t;
 
 static void debounce_init(debounce_t *input, uint8_t initial_state, uint32_t now)
 {
@@ -289,22 +313,12 @@ static bool debounce_update(debounce_t *input, uint8_t raw_state, uint32_t now)
     return false;
 }
 
-/* --------------------------------------------------------------------------
- * Servo con Timer1, PWM de 50 Hz en D9 / OC1A
- * -------------------------------------------------------------------------- */
-
 static void servo_init(void)
 {
     DDRB |= (1 << SERVO_BIT);
-
-    /* Modo 14: Fast PWM, TOP = ICR1, prescaler 8.
-     * Tick = 0.5 us; ICR1 = 39999 produce periodo de 20 ms.
-     */
     TCCR1A = (1 << COM1A1) | (1 << WGM11);
     TCCR1B = (1 << WGM13) | (1 << WGM12) | (1 << CS11);
     ICR1 = 39999U;
-
-    /* 1000 us = 0 grados */
     OCR1A = 2000U;
 }
 
@@ -316,19 +330,10 @@ static void servo_set_degrees(uint8_t degrees)
         degrees = 180U;
     }
 
-    /* Aproximación común: 1000 us a 2000 us */
     pulse_us = (uint16_t)(1000UL + ((uint32_t)degrees * 1000UL / 180UL));
     OCR1A = (uint16_t)(pulse_us * 2U);
+    servo_angle_deg = degrees;
 }
-
-typedef enum {
-    SERVO_IDLE = 0,
-    SERVO_WAITING,
-    SERVO_AT_90
-} servo_state_t;
-
-static servo_state_t servo_state = SERVO_IDLE;
-static uint32_t servo_deadline_ms = 0;
 
 static void servo_schedule(uint32_t now)
 {
@@ -341,44 +346,31 @@ static void servo_schedule(uint32_t now)
 
 static void servo_service(uint32_t now)
 {
-    if ((servo_state == SERVO_WAITING) &&
-        time_reached(now, servo_deadline_ms)) {
+    if ((servo_state == SERVO_WAITING) && time_reached(now, servo_deadline_ms)) {
         servo_set_degrees(90U);
         servo_state = SERVO_AT_90;
         servo_deadline_ms = now + SERVO_HOLD_MS;
         uart_puts("Servo a 90 grados.\r\n");
-    } else if ((servo_state == SERVO_AT_90) &&
-               time_reached(now, servo_deadline_ms)) {
+    } else if ((servo_state == SERVO_AT_90) && time_reached(now, servo_deadline_ms)) {
         servo_set_degrees(0U);
         servo_state = SERVO_IDLE;
         uart_puts("Servo regreso a 0 grados.\r\n");
     }
 }
 
-/* --------------------------------------------------------------------------
- * TWI / I2C a 100 kHz
- * -------------------------------------------------------------------------- */
-
-#define TWI_START_STATUS          0x08U
-#define TWI_REP_START_STATUS      0x10U
-#define TWI_MT_SLA_ACK_STATUS     0x18U
-#define TWI_MT_DATA_ACK_STATUS    0x28U
-#define TWI_MR_SLA_ACK_STATUS     0x40U
-#define TWI_MR_DATA_ACK_STATUS    0x50U
-#define TWI_MR_DATA_NACK_STATUS   0x58U
-
 static void twi_init(void)
 {
-    TWSR = 0x00U; /* Prescaler = 1 */
+    TWSR = 0x00U;
     TWBR = (uint8_t)(((F_CPU / 100000UL) - 16UL) / 2UL);
-    TWCR = (1 << TWEN);
+    TWAR = (uint8_t)(I2C_SLAVE_ADDRESS << 1);
+    TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
 }
 
 static bool twi_wait_interrupt(void)
 {
     uint16_t timeout = 65535U;
 
-    while (((TWCR & (1 << TWINT)) == 0) && (timeout > 0U)) {
+    while (((TWCR & (1 << TWINT)) == 0U) && (timeout > 0U)) {
         timeout--;
     }
 
@@ -395,26 +387,22 @@ static bool twi_start(uint8_t address_rw)
     uint8_t status;
 
     TWCR = (1 << TWINT) | (1 << TWSTA) | (1 << TWEN);
-
     if (!twi_wait_interrupt()) {
         return false;
     }
 
     status = twi_status();
-    if ((status != TWI_START_STATUS) &&
-        (status != TWI_REP_START_STATUS)) {
+    if ((status != TWI_START_STATUS) && (status != TWI_REP_START_STATUS)) {
         return false;
     }
 
     TWDR = address_rw;
     TWCR = (1 << TWINT) | (1 << TWEN);
-
     if (!twi_wait_interrupt()) {
         return false;
     }
 
     status = twi_status();
-
     if ((address_rw & 1U) == 0U) {
         return (status == TWI_MT_SLA_ACK_STATUS);
     }
@@ -460,20 +448,9 @@ static bool twi_read(uint8_t *data, bool acknowledge)
 
 static void twi_stop(void)
 {
-    TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWSTO);
+    TWCR = (1 << TWINT) | (1 << TWSTO) | (1 << TWEN) |
+           (1 << TWEA) | (1 << TWIE);
 }
-
-/* --------------------------------------------------------------------------
- * APDS-9960
- * -------------------------------------------------------------------------- */
-
-#define APDS9960_ADDR       0x39U
-#define APDS_ENABLE         0x80U
-#define APDS_ATIME          0x81U
-#define APDS_ID             0x92U
-#define APDS_STATUS         0x93U
-#define APDS_CDATAL         0x94U
-#define APDS_CONTROL        0x8FU
 
 static bool apds_write_register(uint8_t reg, uint8_t value)
 {
@@ -513,9 +490,7 @@ static bool apds_read_bytes(uint8_t reg, uint8_t *data, uint8_t length)
     }
 
     for (i = 0U; i < length; i++) {
-        const bool ack = (i < (uint8_t)(length - 1U));
-
-        if (!twi_read(&data[i], ack)) {
+        if (!twi_read(&data[i], i < (uint8_t)(length - 1U))) {
             twi_stop();
             return false;
         }
@@ -542,22 +517,18 @@ static bool apds9960_init(void)
     uart_put_u16(id);
     uart_puts("\r\n");
 
-    /* Apagar funciones mientras se configura */
     if (!apds_write_register(APDS_ENABLE, 0x00U)) {
         return false;
     }
 
-    /* Integración aproximada de 103 ms */
     if (!apds_write_register(APDS_ATIME, 0xDBU)) {
         return false;
     }
 
-    /* Ganancia ALS = 4x */
     if (!apds_write_register(APDS_CONTROL, 0x01U)) {
         return false;
     }
 
-    /* PON + AEN */
     if (!apds_write_register(APDS_ENABLE, 0x03U)) {
         return false;
     }
@@ -567,9 +538,9 @@ static bool apds9960_init(void)
 }
 
 static bool apds9960_read_rgbc(uint16_t *clear,
-                              uint16_t *red,
-                              uint16_t *green,
-                              uint16_t *blue)
+                               uint16_t *red,
+                               uint16_t *green,
+                               uint16_t *blue)
 {
     uint8_t status;
     uint8_t data[8];
@@ -578,7 +549,6 @@ static bool apds9960_read_rgbc(uint16_t *clear,
         return false;
     }
 
-    /* Bit AVALID */
     if ((status & 0x01U) == 0U) {
         return false;
     }
@@ -595,12 +565,6 @@ static bool apds9960_read_rgbc(uint16_t *clear,
     return true;
 }
 
-typedef enum {
-    COLOR_NONE = 0,
-    COLOR_RED,
-    COLOR_BLUE
-} detected_color_t;
-
 static detected_color_t classify_color(uint16_t clear,
                                        uint16_t red,
                                        uint16_t green,
@@ -610,40 +574,18 @@ static detected_color_t classify_color(uint16_t clear,
         return COLOR_NONE;
     }
 
-    if (((uint32_t)red * 100UL >
-         (uint32_t)blue * COLOR_DOMINANCE_PERCENT) &&
+    if (((uint32_t)red * 100UL > (uint32_t)blue * COLOR_DOMINANCE_PERCENT) &&
         (red > green)) {
         return COLOR_RED;
     }
 
-    if (((uint32_t)blue * 100UL >
-         (uint32_t)red * COLOR_DOMINANCE_PERCENT) &&
+    if (((uint32_t)blue * 100UL > (uint32_t)red * COLOR_DOMINANCE_PERCENT) &&
         (blue > green)) {
         return COLOR_BLUE;
     }
 
     return COLOR_NONE;
 }
-
-/* --------------------------------------------------------------------------
- * Stepper con A4988
- * -------------------------------------------------------------------------- */
-
-typedef enum {
-    STEPPER_IDLE = 0,
-    STEPPER_WAITING,
-    STEPPER_MOVING_OUT,
-    STEPPER_HOLDING,
-    STEPPER_MOVING_HOME
-} stepper_state_t;
-
-static stepper_state_t stepper_state = STEPPER_IDLE;
-static detected_color_t stepper_color = COLOR_NONE;
-static uint32_t stepper_deadline_ms = 0;
-static uint32_t stepper_next_toggle_ms = 0;
-static uint32_t stepper_steps_done = 0;
-static uint8_t stepper_step_high = 0;
-static uint8_t stepper_out_direction = 0;
 
 static void stepper_set_direction(uint8_t level)
 {
@@ -743,9 +685,7 @@ static void stepper_service(uint32_t now)
     case STEPPER_WAITING:
         if (time_reached(now, stepper_deadline_ms)) {
             const uint8_t direction =
-                (stepper_color == COLOR_RED) ? RED_DIR_LEVEL :
-                                               (uint8_t)!RED_DIR_LEVEL;
-
+                (stepper_color == COLOR_RED) ? RED_DIR_LEVEL : (uint8_t)!RED_DIR_LEVEL;
             stepper_begin_move(STEPPER_MOVING_OUT, direction, now);
             uart_puts("Stepper inicia movimiento de salida.\r\n");
         }
@@ -765,19 +705,14 @@ static void stepper_service(uint32_t now)
         }
         break;
 
-    case STEPPER_IDLE:
     default:
         break;
     }
 }
 
-/* --------------------------------------------------------------------------
- * HX711
- * -------------------------------------------------------------------------- */
-
 static bool hx711_ready(void)
 {
-    return ((PIND & (1 << HX_DOUT_BIT)) == 0);
+    return ((PIND & (1 << HX_DOUT_BIT)) == 0U);
 }
 
 static int32_t hx711_read_raw(void)
@@ -787,10 +722,9 @@ static int32_t hx711_read_raw(void)
     uint8_t old_sreg;
 
     if (!hx711_ready()) {
-        return 0L;
+        return last_weight_raw;
     }
 
-    /* Se desactivan interrupciones para que SCK no quede alto demasiado tiempo */
     old_sreg = SREG;
     cli();
 
@@ -799,7 +733,7 @@ static int32_t hx711_read_raw(void)
         _delay_us(1);
 
         value <<= 1;
-        if ((PIND & (1 << HX_DOUT_BIT)) != 0) {
+        if ((PIND & (1 << HX_DOUT_BIT)) != 0U) {
             value++;
         }
 
@@ -807,7 +741,6 @@ static int32_t hx711_read_raw(void)
         _delay_us(1);
     }
 
-    /* Pulso 25: canal A, ganancia 128 */
     PORTD |= (1 << HX_SCK_BIT);
     _delay_us(1);
     PORTD &= ~(1 << HX_SCK_BIT);
@@ -815,7 +748,6 @@ static int32_t hx711_read_raw(void)
 
     SREG = old_sreg;
 
-    /* Extensión de signo de 24 a 32 bits */
     if ((value & 0x00800000UL) != 0UL) {
         value |= 0xFF000000UL;
     }
@@ -825,7 +757,7 @@ static int32_t hx711_read_raw(void)
 
 static void weight_service(uint32_t now)
 {
-    static uint32_t last_read_ms = 0;
+    static uint32_t last_read_ms = 0UL;
 
     if (!interval_elapsed(now, last_read_ms, WEIGHT_SAMPLE_MS)) {
         return;
@@ -834,31 +766,25 @@ static void weight_service(uint32_t now)
     last_read_ms = now;
 
     if (hx711_ready()) {
-        const int32_t raw = hx711_read_raw();
+        last_weight_raw = hx711_read_raw();
 
         uart_puts("HX711 bruto: ");
-        uart_put_i32(raw);
+        uart_put_i32(last_weight_raw);
 
 #if HX711_COUNTS_PER_GRAM != 0
         uart_puts(" | peso aproximado: ");
-        uart_put_i32((raw - HX711_OFFSET) / HX711_COUNTS_PER_GRAM);
+        uart_put_i32((last_weight_raw - HX711_OFFSET) / HX711_COUNTS_PER_GRAM);
         uart_puts(" g");
 #endif
-
         uart_puts("\r\n");
     }
 }
 
-/* --------------------------------------------------------------------------
- * Lectura periódica de color
- * -------------------------------------------------------------------------- */
-
 static void color_service(uint32_t now)
 {
-    static uint32_t last_sample_ms = 0;
+    static uint32_t last_sample_ms = 0UL;
     static uint8_t color_armed = 1U;
     static uint8_t no_color_samples = 0U;
-
     uint16_t clear;
     uint16_t red;
     uint16_t green;
@@ -892,6 +818,7 @@ static void color_service(uint32_t now)
 
     if (color_armed && (stepper_state == STEPPER_IDLE)) {
         color_armed = 0U;
+        last_color_detected = color;
 
         uart_puts("Color C=");
         uart_put_u16(clear);
@@ -907,9 +834,21 @@ static void color_service(uint32_t now)
     }
 }
 
-/* --------------------------------------------------------------------------
- * Programa principal
- * -------------------------------------------------------------------------- */
+static void i2c_update_status(uint8_t dc_motor_on)
+{
+    uint32_t raw = (uint32_t)last_weight_raw;
+
+    g_i2c_regs[0] = dc_motor_on;
+    g_i2c_regs[1] = proximity_active_raw();
+    g_i2c_regs[2] = (uint8_t)servo_state;
+    g_i2c_regs[3] = servo_angle_deg;
+    g_i2c_regs[4] = (uint8_t)last_color_detected;
+    g_i2c_regs[5] = (uint8_t)stepper_state;
+    g_i2c_regs[6] = (uint8_t)(raw >> 24);
+    g_i2c_regs[7] = (uint8_t)(raw >> 16);
+    g_i2c_regs[8] = (uint8_t)(raw >> 8);
+    g_i2c_regs[9] = (uint8_t)(raw);
+}
 
 int main(void)
 {
@@ -919,18 +858,15 @@ int main(void)
     uint32_t now;
 
     cli();
-
     gpio_init();
     uart_init();
     timer0_millis_init();
     servo_init();
     twi_init();
-
     sei();
 
     _delay_ms(100);
-
-    uart_puts("\r\nSistema iniciado.\r\n");
+    uart_puts("\r\nSistema esclavo iniciado.\r\n");
 
     if (apds9960_init()) {
         uart_puts("APDS-9960 iniciado correctamente.\r\n");
@@ -938,6 +874,7 @@ int main(void)
         uart_puts("ERROR: no se pudo iniciar el APDS-9960.\r\n");
     }
 
+    servo_set_degrees(0U);
     now = millis_get();
     debounce_init(&button, button_pressed_raw(), now);
     debounce_init(&proximity, proximity_active_raw(), now);
@@ -945,7 +882,6 @@ int main(void)
     for (;;) {
         now = millis_get();
 
-        /* Botón: una pulsación cambia ON/OFF */
         if (debounce_update(&button, button_pressed_raw(), now) &&
             button.stable_state) {
             dc_motor_on = (uint8_t)!dc_motor_on;
@@ -958,7 +894,6 @@ int main(void)
             }
         }
 
-        /* Evento únicamente al pasar de no detectado a detectado */
         if (debounce_update(&proximity, proximity_active_raw(), now) &&
             proximity.stable_state) {
             servo_schedule(now);
@@ -968,5 +903,6 @@ int main(void)
         color_service(now);
         stepper_service(now);
         weight_service(now);
+        i2c_update_status(dc_motor_on);
     }
 }

@@ -15,6 +15,7 @@
 #include <util/delay.h>
 #include <stdio.h>
 #include "lcd.h"
+#include "uart.h"
 
 /****************************************/
 // Function prototypes
@@ -43,12 +44,16 @@ int main(void)
 	//Valor de S2
 	uint16_t s2;
 	//Valor de S3
-	uint16_t s3;
+	int8_t s3 = 0;
+	//Dato recibido
+	char dato;
 
 	//Iniciar LCD
 	lcd_init();
 	//Iniciar ADC
 	adc_init();
+	//Iniciar UART
+	uart_init();
 
 	while (1)
 	{
@@ -56,15 +61,31 @@ int main(void)
 		s1 = leer_ADC(4);
 		//Leer S2 en A5
 		s2 = leer_ADC(5);
-		//Leer S3 en A6
-		s3 = leer_ADC(6);
+		//Revisar si llego algo por UART
+		if (uart_hay_dato())
+		{
+			//Guardar lo que llego
+			dato = uart_rx();
+
+			//Si llega + se suma 1
+			if (dato == '+')
+			{
+				s3++;
+			}
+
+			//Si llega - se resta 1
+			if (dato == '-')
+			{
+				s3--;
+			}
+		}
 
 		//Pasar S1 a voltaje
 		pasar_a_voltaje(s1, v1);
 		//Pasar S2 a voltaje
 		pasar_a_voltaje(s2, v2);
-		//Pasar S3 a voltaje
-		pasar_a_voltaje(s3, v3);
+		//Pasar S3 a texto
+		snprintf(v3, sizeof(v3), "%4d", s3);
 
 		//Texto de la fila de arriba
 		snprintf(texto1, sizeof(texto1), "S1    S2    S3  ");

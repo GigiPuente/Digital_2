@@ -19,7 +19,10 @@
 #include <stdbool.h>
 
 #define PROX_BIT          PD2
+#define DC_AIN2_BIT       PD6
+#define DC_AIN1_BIT       PD7
 #define SERVO_BIT         PB1
+#define DC_PWMA_BIT       PB0
 
 #define TWI_SDA_BIT       PC4
 #define TWI_SCL_BIT       PC5
@@ -27,13 +30,17 @@
 #define PROX_ACTIVE_LOW   1
 #define SERVO_WAIT_MS     1000UL
 #define SERVO_HOLD_MS     1000UL
+#define DC_STOP_MS        3000UL
+#define SYSTEM_PAUSE_MS   5000UL
 
 #define I2C_SLAVE_ADDRESS 0x12U
 #define I2C_PRESCALER_BITS 0x03U
 #define I2C_BITRATE_VALUE  12U
+#define SLAVE_CMD_PAUSE_5S 0xA5U
 
 static volatile uint32_t g_millis = 0UL;
 static volatile uint8_t g_i2c_box_count = 0U;
+static volatile uint8_t g_i2c_rx_command = 0U;
 static uint8_t g_box_count = 0U;
 
 typedef struct {
@@ -51,6 +58,10 @@ typedef enum {
 static servo_state_t servo_state = SERVO_IDLE;
 static uint32_t servo_deadline_ms = 0UL;
 static uint8_t g_servo_position_deg = 0U;
+static uint32_t g_dc_resume_ms = 0UL;
+static uint8_t g_dc_running = 0U;
+static uint8_t g_system_paused = 0U;
+static uint32_t g_system_pause_until_ms = 0UL;
 
 ISR(TIMER0_COMPA_vect)
 {
@@ -64,6 +75,12 @@ ISR(TWI_vect)
     case 0x68U:
     case 0x70U:
     case 0x78U:
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
+
+    case 0x80U:
+    case 0x90U:
+        g_i2c_rx_command = TWDR;
         TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
         break;
 
@@ -129,6 +146,11 @@ static void gpio_init(void)
 {
     DDRD &= ~(1 << PROX_BIT);
     PORTD |= (1 << PROX_BIT);
+    DDRD |= (1 << DC_AIN1_BIT) | (1 << DC_AIN2_BIT);
+    PORTD &= ~((1 << DC_AIN1_BIT) | (1 << DC_AIN2_BIT));
+
+    DDRB |= (1 << DC_PWMA_BIT);
+    PORTB &= ~(1 << DC_PWMA_BIT);
 
     DDRC &= ~((1 << TWI_SDA_BIT) | (1 << TWI_SCL_BIT));
     PORTC |= (1 << TWI_SDA_BIT) | (1 << TWI_SCL_BIT);
@@ -166,6 +188,64 @@ static void servo_init(void)
     OCR1A = 2000U;
 }
 
+static void dc_motor_set(uint8_t enabled)
+{
+    if (enabled) {
+        PORTD |= (1 << DC_AIN1_BIT);
+        PORTD &= ~(1 << DC_AIN2_BIT);
+        PORTB |= (1 << DC_PWMA_BIT);
+        g_dc_running = 1U;
+    } else {
+        PORTD &= ~((1 << DC_AIN1_BIT) | (1 << DC_AIN2_BIT));
+        PORTB &= ~(1 << DC_PWMA_BIT);
+        g_dc_running = 0U;
+    }
+}
+
+static void dc_motor_pause(uint32_t now)
+{
+    dc_motor_set(0U);
+    g_dc_resume_ms = now + DC_STOP_MS;
+}
+
+static void dc_motor_service(uint32_t now)
+{
+    if ((!g_dc_running) && time_reached(now, g_dc_resume_ms)) {
+        dc_motor_set(1U);
+    }
+}
+
+static void system_pause_start(uint32_t now)
+{
+    if (servo_state != SERVO_IDLE) {
+        servo_deadline_ms += SYSTEM_PAUSE_MS;
+    }
+
+    if (g_dc_running || time_reached(now, g_dc_resume_ms)) {
+        g_dc_resume_ms = now + SYSTEM_PAUSE_MS;
+    } else {
+        g_dc_resume_ms += SYSTEM_PAUSE_MS;
+    }
+
+    dc_motor_set(0U);
+    g_system_paused = 1U;
+    g_system_pause_until_ms = now + SYSTEM_PAUSE_MS;
+}
+
+static void system_pause_service(uint32_t now)
+{
+    uint8_t command = g_i2c_rx_command;
+
+    if (command == SLAVE_CMD_PAUSE_5S) {
+        g_i2c_rx_command = 0U;
+        system_pause_start(now);
+    }
+
+    if (g_system_paused && time_reached(now, g_system_pause_until_ms)) {
+        g_system_paused = 0U;
+    }
+}
+
 static void servo_set_degrees(uint8_t degrees)
 {
     uint16_t pulse_us;
@@ -201,6 +281,7 @@ static void servo_schedule(uint32_t now)
 static void servo_service(uint32_t now)
 {
     if ((servo_state == SERVO_WAITING) && time_reached(now, servo_deadline_ms)) {
+        dc_motor_pause(now);
         servo_set_degrees(90U);
         servo_state = SERVO_AT_90;
         servo_deadline_ms = now + SERVO_HOLD_MS;
@@ -236,11 +317,18 @@ int main(void)
     sei();
 
     servo_set_degrees(0U);
+    dc_motor_set(1U);
     now = millis_get();
     debounce_init(&proximity, proximity_active_raw(), now);
 
     for (;;) {
         now = millis_get();
+        system_pause_service(now);
+
+        if (g_system_paused) {
+            i2c_update_status();
+            continue;
+        }
 
         if (debounce_update(&proximity, proximity_active_raw(), now) &&
             proximity.stable_state) {
@@ -248,6 +336,7 @@ int main(void)
         }
 
         servo_service(now);
+        dc_motor_service(now);
         i2c_update_status();
     }
 }

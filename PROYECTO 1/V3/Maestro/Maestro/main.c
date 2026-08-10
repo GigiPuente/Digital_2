@@ -17,7 +17,6 @@
 #include <stdio.h>
 
 #define LCD_E_BIT    PD2
-#define LCD_RW_BIT   PD3
 #define LCD_RS_BIT   PD4
 #define LCD_D7_BIT   PD5
 #define LCD_D6_BIT   PD6
@@ -33,8 +32,14 @@
 #define TWI_SCL_BIT  PC5
 
 #define I2C_SLAVE_ADDRESS        0x12U
+#define LM75_I2C_ADDRESS         0x48U
+#define LM75_TEMP_REGISTER       0x00U
+#define TEMP_STOP_THRESHOLD_C    80
+#define SLAVE_CMD_PAUSE_5S       0xA5U
 #define I2C_PRESCALER_BITS       0x03U
 #define I2C_BITRATE_VALUE        12U
+#define TELEMETRY_INTERVAL_MS    1000UL
+#define SOFT_UART_BIT_US         104U
 
 #define TWI_START_STATUS         0x08U
 #define TWI_REP_START_STATUS     0x10U
@@ -46,15 +51,66 @@
 
 static uint16_t g_box_count = 0U;
 static uint8_t g_i2c_online = 0U;
+static uint8_t g_overtemp_latched = 0U;
+static int8_t g_last_temp_c = 0;
+static uint8_t g_temp_valid = 0U;
+
+static void telemetry_uart_init(void)
+{
+    DDRD |= (1 << PD3);
+    PORTD |= (1 << PD3);
+}
+
+static void telemetry_uart_write_byte(uint8_t value)
+{
+    uint8_t bit_index;
+
+    PORTD &= ~(1 << PD3);
+    _delay_us(SOFT_UART_BIT_US);
+
+    for (bit_index = 0U; bit_index < 8U; bit_index++) {
+        if ((value & (1U << bit_index)) != 0U) {
+            PORTD |= (1 << PD3);
+        } else {
+            PORTD &= ~(1 << PD3);
+        }
+        _delay_us(SOFT_UART_BIT_US);
+    }
+
+    PORTD |= (1 << PD3);
+    _delay_us(SOFT_UART_BIT_US);
+}
+
+static void telemetry_uart_write_text(const char *text)
+{
+    while (*text != '\0') {
+        telemetry_uart_write_byte((uint8_t)(*text));
+        text++;
+    }
+}
+
+static void telemetry_send_frame(void)
+{
+    char line[64];
+
+    snprintf(line,
+             sizeof(line),
+             "boxes=%u,temp_c=%d,alarm=%u,i2c=%u\r\n",
+             g_box_count,
+             g_temp_valid ? g_last_temp_c : -127,
+             g_overtemp_latched,
+             g_i2c_online);
+    telemetry_uart_write_text(line);
+}
 
 static void gpio_init(void)
 {
-    DDRD |= (1 << LCD_E_BIT) | (1 << LCD_RW_BIT) | (1 << LCD_RS_BIT) |
+    DDRD |= (1 << LCD_E_BIT) | (1 << LCD_RS_BIT) |
             (1 << LCD_D7_BIT) | (1 << LCD_D6_BIT) | (1 << LCD_D5_BIT);
     DDRB |= (1 << LCD_D4_BIT) | (1 << LCD_D3_BIT) | (1 << LCD_D2_BIT) |
             (1 << LCD_D1_BIT) | (1 << LCD_D0_BIT);
 
-    PORTD &= ~((1 << LCD_E_BIT) | (1 << LCD_RW_BIT) | (1 << LCD_RS_BIT) |
+    PORTD &= ~((1 << LCD_E_BIT) | (1 << LCD_RS_BIT) |
                (1 << LCD_D7_BIT) | (1 << LCD_D6_BIT) | (1 << LCD_D5_BIT));
     PORTB &= ~((1 << LCD_D4_BIT) | (1 << LCD_D3_BIT) | (1 << LCD_D2_BIT) |
                (1 << LCD_D1_BIT) | (1 << LCD_D0_BIT));
@@ -88,7 +144,6 @@ static void lcd_write_raw(uint8_t value, uint8_t rs)
         PORTD &= ~(1 << LCD_RS_BIT);
     }
 
-    PORTD &= ~(1 << LCD_RW_BIT);
     lcd_set_data(value);
     lcd_pulse_enable();
 }
@@ -134,7 +189,6 @@ static void lcd_print_padded(const char *text)
 static void lcd_init(void)
 {
     PORTD &= ~(1 << LCD_RS_BIT);
-    PORTD &= ~(1 << LCD_RW_BIT);
     PORTD &= ~(1 << LCD_E_BIT);
 
     _delay_ms(50);
@@ -212,6 +266,18 @@ static bool twi_start(uint8_t address_rw)
     return (status == TWI_MR_SLA_ACK_STATUS);
 }
 
+static bool twi_write(uint8_t data)
+{
+    TWDR = data;
+    TWCR = (1 << TWINT) | (1 << TWEN);
+
+    if (!twi_wait_interrupt()) {
+        return false;
+    }
+
+    return (twi_status() == TWI_MT_DATA_ACK_STATUS);
+}
+
 static bool twi_read(uint8_t *data, bool acknowledge)
 {
     if (acknowledge) {
@@ -241,6 +307,22 @@ static void twi_stop(void)
     TWCR = (1 << TWINT) | (1 << TWEN) | (1 << TWSTO);
 }
 
+static bool write_slave_command(uint8_t command)
+{
+    if (!twi_start((uint8_t)(I2C_SLAVE_ADDRESS << 1))) {
+        twi_stop();
+        return false;
+    }
+
+    if (!twi_write(command)) {
+        twi_stop();
+        return false;
+    }
+
+    twi_stop();
+    return true;
+}
+
 static bool read_slave_box_count(uint8_t *count)
 {
     uint8_t data;
@@ -267,6 +349,42 @@ static bool read_slave_box_count(uint8_t *count)
     return false;
 }
 
+static bool read_lm75_temp_c(int8_t *temp_c)
+{
+    uint8_t msb;
+    uint8_t lsb;
+
+    if (!twi_start((uint8_t)(LM75_I2C_ADDRESS << 1))) {
+        twi_stop();
+        return false;
+    }
+
+    if (!twi_write(LM75_TEMP_REGISTER)) {
+        twi_stop();
+        return false;
+    }
+
+    if (!twi_start((uint8_t)((LM75_I2C_ADDRESS << 1) | 1U))) {
+        twi_stop();
+        return false;
+    }
+
+    if (!twi_read(&msb, true)) {
+        twi_stop();
+        return false;
+    }
+
+    if (!twi_read(&lsb, false)) {
+        twi_stop();
+        return false;
+    }
+
+    twi_stop();
+    (void)lsb;
+    *temp_c = (int8_t)msb;
+    return true;
+}
+
 static void draw_screen(void)
 {
     char line[17];
@@ -288,6 +406,7 @@ int main(void)
     gpio_init();
     lcd_init();
     twi_init();
+    telemetry_uart_init();
 
     lcd_set_cursor(0U, 0U);
     lcd_print_padded("Cantidad cajas");
@@ -297,6 +416,21 @@ int main(void)
 
     for (;;) {
         uint8_t box_count;
+        int8_t temp_c;
+        static uint32_t telemetry_elapsed_ms = 0UL;
+
+        if (read_lm75_temp_c(&temp_c)) {
+            g_last_temp_c = temp_c;
+            g_temp_valid = 1U;
+            if ((temp_c >= TEMP_STOP_THRESHOLD_C) && !g_overtemp_latched) {
+                write_slave_command(SLAVE_CMD_PAUSE_5S);
+                g_overtemp_latched = 1U;
+            } else if (temp_c < TEMP_STOP_THRESHOLD_C) {
+                g_overtemp_latched = 0U;
+            }
+        } else {
+            g_temp_valid = 0U;
+        }
 
         if (read_slave_box_count(&box_count)) {
             g_box_count = box_count;
@@ -306,6 +440,11 @@ int main(void)
         }
 
         draw_screen();
+        telemetry_elapsed_ms += 200UL;
+        if (telemetry_elapsed_ms >= TELEMETRY_INTERVAL_MS) {
+            telemetry_elapsed_ms = 0UL;
+            telemetry_send_frame();
+        }
         _delay_ms(200);
     }
 }

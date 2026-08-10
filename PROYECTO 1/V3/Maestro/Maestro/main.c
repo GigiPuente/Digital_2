@@ -31,7 +31,8 @@
 #define TWI_SDA_BIT  PC4
 #define TWI_SCL_BIT  PC5
 
-#define I2C_SLAVE_ADDRESS        0x12U
+#define ESCLAVO1_I2C_ADDRESS     0x12U
+#define ESCLAVO2_I2C_ADDRESS     0x13U
 #define LM75_I2C_ADDRESS         0x48U
 #define LM75_TEMP_REGISTER       0x00U
 #define TEMP_STOP_THRESHOLD_C    80
@@ -54,6 +55,10 @@ static uint8_t g_i2c_online = 0U;
 static uint8_t g_overtemp_latched = 0U;
 static int8_t g_last_temp_c = 0;
 static uint8_t g_temp_valid = 0U;
+static uint8_t g_stepper_cycles = 0U;
+static uint8_t g_stepper_state = 0U;
+static int32_t g_last_weight_g = 0L;
+static uint8_t g_esclavo2_online = 0U;
 
 static void telemetry_uart_init(void)
 {
@@ -91,15 +96,18 @@ static void telemetry_uart_write_text(const char *text)
 
 static void telemetry_send_frame(void)
 {
-    char line[64];
+    char line[96];
 
     snprintf(line,
              sizeof(line),
-             "boxes=%u,temp_c=%d,alarm=%u,i2c=%u\r\n",
+             "boxes=%u,temp_c=%d,alarm=%u,i2c=%u,weight_g=%ld,stepper=%u,cycles=%u\r\n",
              g_box_count,
              g_temp_valid ? g_last_temp_c : -127,
              g_overtemp_latched,
-             g_i2c_online);
+             g_i2c_online,
+             (long)g_last_weight_g,
+             g_stepper_state,
+             g_stepper_cycles);
     telemetry_uart_write_text(line);
 }
 
@@ -309,7 +317,7 @@ static void twi_stop(void)
 
 static bool write_slave_command(uint8_t command)
 {
-    if (!twi_start((uint8_t)(I2C_SLAVE_ADDRESS << 1))) {
+    if (!twi_start((uint8_t)(ESCLAVO1_I2C_ADDRESS << 1))) {
         twi_stop();
         return false;
     }
@@ -329,7 +337,7 @@ static bool read_slave_box_count(uint8_t *count)
     uint8_t attempts;
 
     for (attempts = 0U; attempts < 3U; attempts++) {
-        if (!twi_start((uint8_t)((I2C_SLAVE_ADDRESS << 1) | 1U))) {
+        if (!twi_start((uint8_t)((ESCLAVO1_I2C_ADDRESS << 1) | 1U))) {
             twi_stop();
             _delay_ms(5);
             continue;
@@ -347,6 +355,46 @@ static bool read_slave_box_count(uint8_t *count)
     }
 
     return false;
+}
+
+static bool read_esclavo2_status(void)
+{
+    uint8_t data[6];
+    uint8_t i;
+    uint32_t raw_weight = 0UL;
+
+    if (!twi_start((uint8_t)(ESCLAVO2_I2C_ADDRESS << 1))) {
+        twi_stop();
+        return false;
+    }
+
+    if (!twi_write(0U)) {
+        twi_stop();
+        return false;
+    }
+
+    if (!twi_start((uint8_t)((ESCLAVO2_I2C_ADDRESS << 1) | 1U))) {
+        twi_stop();
+        return false;
+    }
+
+    for (i = 0U; i < sizeof(data); i++) {
+        if (!twi_read(&data[i], i < (uint8_t)(sizeof(data) - 1U))) {
+            twi_stop();
+            return false;
+        }
+    }
+
+    twi_stop();
+
+    g_stepper_cycles = data[0];
+    g_stepper_state = data[1];
+    raw_weight = ((uint32_t)data[2] << 24) |
+                 ((uint32_t)data[3] << 16) |
+                 ((uint32_t)data[4] << 8) |
+                 (uint32_t)data[5];
+    g_last_weight_g = (int32_t)raw_weight;
+    return true;
 }
 
 static bool read_lm75_temp_c(int8_t *temp_c)
@@ -388,16 +436,33 @@ static bool read_lm75_temp_c(int8_t *temp_c)
 static void draw_screen(void)
 {
     char line[17];
+    char weight_field[5];
+    char boxes_field[6];
+    char temp_field[4];
 
     lcd_set_cursor(0U, 0U);
-    lcd_print_padded("Cantidad cajas");
+    lcd_print_padded("PESO CAJAS TEMP");
 
-    lcd_set_cursor(0U, 1U);
-    if (g_i2c_online) {
-        snprintf(line, sizeof(line), "%u", g_box_count);
+    if (g_esclavo2_online) {
+        snprintf(weight_field, sizeof(weight_field), "%4ld", (long)g_last_weight_g);
     } else {
-        snprintf(line, sizeof(line), "I2C sin ACK");
+        snprintf(weight_field, sizeof(weight_field), "----");
     }
+
+    if (g_i2c_online) {
+        snprintf(boxes_field, sizeof(boxes_field), "%5u", g_box_count);
+    } else {
+        snprintf(boxes_field, sizeof(boxes_field), "-----");
+    }
+
+    if (g_temp_valid) {
+        snprintf(temp_field, sizeof(temp_field), "%3d", g_last_temp_c);
+    } else {
+        snprintf(temp_field, sizeof(temp_field), "---");
+    }
+
+    snprintf(line, sizeof(line), "%s %s %s", weight_field, boxes_field, temp_field);
+    lcd_set_cursor(0U, 1U);
     lcd_print_padded(line);
 }
 
@@ -409,9 +474,9 @@ int main(void)
     telemetry_uart_init();
 
     lcd_set_cursor(0U, 0U);
-    lcd_print_padded("Cantidad cajas");
+    lcd_print_padded("PESO CAJAS TEMP");
     lcd_set_cursor(0U, 1U);
-    lcd_print_padded("I2C sin ACK");
+    lcd_print_padded("---- ----- ---");
     _delay_ms(500);
 
     for (;;) {
@@ -437,6 +502,12 @@ int main(void)
             g_i2c_online = 1U;
         } else {
             g_i2c_online = 0U;
+        }
+
+        if (read_esclavo2_status()) {
+            g_esclavo2_online = 1U;
+        } else {
+            g_esclavo2_online = 0U;
         }
 
         draw_screen();

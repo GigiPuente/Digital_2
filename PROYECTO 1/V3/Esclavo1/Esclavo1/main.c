@@ -18,7 +18,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define PROX_BIT          PD2
+#define PROX_BIT          PB2
 #define DC_AIN2_BIT       PD6
 #define DC_AIN1_BIT       PD7
 #define SERVO_BIT         PB1
@@ -27,7 +27,7 @@
 #define TWI_SDA_BIT       PC4
 #define TWI_SCL_BIT       PC5
 
-#define PROX_ACTIVE_LOW   1
+#define PROX_ACTIVE_LOW   0
 #define SERVO_WAIT_MS     1000UL
 #define SERVO_HOLD_MS     1000UL
 #define DC_STOP_MS        3000UL
@@ -136,16 +136,16 @@ static void timer0_millis_init(void)
 static uint8_t proximity_active_raw(void)
 {
 #if PROX_ACTIVE_LOW
-    return ((PIND & (1 << PROX_BIT)) == 0U);
+    return ((PINB & (1 << PROX_BIT)) == 0U);
 #else
-    return ((PIND & (1 << PROX_BIT)) != 0U);
+    return ((PINB & (1 << PROX_BIT)) != 0U);
 #endif
 }
 
 static void gpio_init(void)
 {
-    DDRD &= ~(1 << PROX_BIT);
-    PORTD |= (1 << PROX_BIT);
+    DDRB &= ~(1 << PROX_BIT);
+    PORTB |= (1 << PROX_BIT);
     DDRD |= (1 << DC_AIN1_BIT) | (1 << DC_AIN2_BIT);
     PORTD &= ~((1 << DC_AIN1_BIT) | (1 << DC_AIN2_BIT));
 

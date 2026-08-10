@@ -22,6 +22,9 @@ unsigned long lastPublishMs = 0UL;
 int latestBoxes = 0;
 int latestTempC = -127;
 int latestAlarm = 0;
+int latestWeightG = 0;
+int latestStepperState = 0;
+int latestStepperCycles = 0;
 bool telemetryDirty = false;
 
 static bool extractIntField(const char *line, const char *key, int *value) {
@@ -51,6 +54,19 @@ static void parseTelemetry(const char *line) {
   if (extractIntField(line, "alarm=", &parsedValue)) {
     latestAlarm = parsedValue;
   }
+
+  if (extractIntField(line, "weight_g=", &parsedValue)) {
+    latestWeightG = parsedValue;
+  }
+
+  if (extractIntField(line, "stepper=", &parsedValue)) {
+    latestStepperState = parsedValue;
+  }
+
+  if (extractIntField(line, "cycles=", &parsedValue)) {
+    latestStepperCycles = parsedValue;
+  }
+
   telemetryDirty = true;
 }
 
@@ -66,6 +82,9 @@ static void publishTelemetryIfDue(void) {
   telemetryGroup->set("boxes", latestBoxes);
   telemetryGroup->set("temp_c", latestTempC);
   telemetryGroup->set("alarm", latestAlarm);
+  telemetryGroup->set("weight_g", latestWeightG);
+  telemetryGroup->set("stepper", latestStepperState);
+  telemetryGroup->set("cycles", latestStepperCycles);
 
   if (telemetryGroup->save()) {
     Serial.println("Adafruit IO: datos publicados.");

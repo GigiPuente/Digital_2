@@ -1,9 +1,12 @@
 /*
- * Esclavo2:
- * - Lee HX711 y dispara el stepper al llegar a 500 g
- * - Permite disparo manual con boton
- * - Expone estado por I2C con direccion propia
+ * Esclavo2.c
+ *
+ * Created:
+ * Author:
+ * Description:
  */
+/****************************************/
+// Encabezado (Libraries)
 
 #ifndef F_CPU
 #define F_CPU 16000000UL
@@ -15,35 +18,42 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// Pines del stepper
 #define STEPPER_IN1_BIT         PD4
 #define STEPPER_IN2_BIT         PD5
 #define STEPPER_IN3_BIT         PD6
 #define STEPPER_IN4_BIT         PD7
 
+// Pines del HX711 y boton
 #define HX711_DT_BIT            PB0
 #define HX711_SCK_BIT           PB1
 #define BUTTON_BIT              PB2
 
+// Pines I2C
 #define TWI_SDA_BIT             PC4
 #define TWI_SCL_BIT             PC5
 
+// Direccion y velocidad I2C
 #define I2C_SLAVE_ADDRESS       0x13U
 #define I2C_PRESCALER_BITS      0x03U
 #define I2C_BITRATE_VALUE       12U
 
+// Configuracion del sensor de peso
 #define HX711_SAMPLE_MS         200UL
 #define HX711_OFFSET_COUNTS     0L
 #define HX711_COUNTS_PER_GRAM   1L
 #define WEIGHT_TRIGGER_GRAMS    500L
 #define WEIGHT_REARM_GRAMS      450L
 
+// Configuracion del boton y stepper
 #define BUTTON_DEBOUNCE_MS      30UL
 #define STEPPER_STEP_DELAY_MS   3UL
 #define STEPPER_STEPS_180       1024U
 #define STEPPER_HOLD_MS         3000UL
 
+// Variables globales del esclavo 2
 static volatile uint32_t g_millis = 0UL;
-static volatile uint8_t g_i2c_regs[6] = {0U};
+static volatile uint8_t g_i2c_regs[7] = {0U};
 static volatile uint8_t g_i2c_reg_pointer = 0U;
 
 typedef struct {
@@ -67,47 +77,80 @@ static uint32_t g_stepper_hold_until_ms = 0UL;
 static uint8_t g_cycle_count = 0U;
 static int32_t g_last_weight_grams = 0L;
 static uint8_t g_weight_armed = 1U;
+static uint8_t g_button_state = 0U;
 
-ISR(TIMER0_COMPA_vect)
+/****************************************/
+// Function prototypes
+
+// Tiempo y utilidades
+static uint32_t millis_get(void);
+static bool time_reached(uint32_t now, uint32_t deadline);
+static bool interval_elapsed(uint32_t now, uint32_t previous, uint32_t interval);
+static void timer0_millis_init(void);
+
+// Configuracion de pines
+static void gpio_init(void);
+
+// Boton
+static void debounce_init(debounce_t *input, uint8_t initial_state, uint32_t now);
+static bool debounce_update(debounce_t *input, uint8_t raw_state, uint32_t now);
+static uint8_t button_pressed_raw(void);
+
+// Stepper
+static void stepper_outputs_off(void);
+static void stepper_apply_phase(uint8_t phase);
+static void stepper_start_cycle(uint32_t now);
+static void stepper_service(uint32_t now);
+
+// Sensor de peso HX711
+static uint8_t hx711_ready(void);
+static int32_t hx711_read_raw(void);
+static void weight_service(uint32_t now);
+
+// I2C
+static void twi_init(void);
+static void i2c_update_status(void);
+
+/****************************************/
+// Main Function
+
+int main(void)
 {
-    g_millis++;
-}
+    debounce_t button;
+    uint32_t now;
 
-ISR(TWI_vect)
-{
-    switch (TWSR & 0xF8U) {
-    case 0x60U:
-    case 0x68U:
-    case 0x70U:
-    case 0x78U:
-        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
-        break;
+    cli();
+    gpio_init();
+    timer0_millis_init();
+    twi_init();
+    sei();
 
-    case 0x80U:
-    case 0x90U:
-        g_i2c_reg_pointer = TWDR;
-        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
-        break;
+    now = millis_get();
+    debounce_init(&button, button_pressed_raw(), now);
 
-    case 0xA0U:
-        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
-        break;
+    for (;;) {
+        now = millis_get();
 
-    case 0xA8U:
-    case 0xB0U:
-    case 0xB8U:
-    case 0xC8U:
-        TWDR = g_i2c_regs[g_i2c_reg_pointer % sizeof(g_i2c_regs)];
-        g_i2c_reg_pointer++;
-        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
-        break;
+        // Lectura del boton
+        g_button_state = button_pressed_raw();
+        if (debounce_update(&button, button_pressed_raw(), now) &&
+            button.stable_state) {
+            stepper_start_cycle(now);
+        }
 
-    default:
-        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
-        break;
+        // Lectura del peso y movimiento del stepper
+        weight_service(now);
+        stepper_service(now);
+
+        // Actualizacion I2C
+        i2c_update_status();
     }
 }
 
+/****************************************/
+// NON-Interrupt subroutines
+
+// Tiempo y utilidades
 static uint32_t millis_get(void)
 {
     uint32_t value;
@@ -137,6 +180,7 @@ static void timer0_millis_init(void)
     TIMSK0 = (1 << OCIE0A);
 }
 
+// Configuracion de pines
 static void gpio_init(void)
 {
     DDRD |= (1 << STEPPER_IN1_BIT) | (1 << STEPPER_IN2_BIT) |
@@ -153,6 +197,7 @@ static void gpio_init(void)
     PORTC |= (1 << TWI_SDA_BIT) | (1 << TWI_SCL_BIT);
 }
 
+// Boton
 static void debounce_init(debounce_t *input, uint8_t initial_state, uint32_t now)
 {
     input->stable_state = initial_state;
@@ -181,6 +226,7 @@ static uint8_t button_pressed_raw(void)
     return ((PINB & (1 << BUTTON_BIT)) == 0U);
 }
 
+// Stepper
 static void stepper_outputs_off(void)
 {
     PORTD &= ~((1 << STEPPER_IN1_BIT) | (1 << STEPPER_IN2_BIT) |
@@ -263,6 +309,7 @@ static void stepper_service(uint32_t now)
     }
 }
 
+// Sensor de peso HX711
 static uint8_t hx711_ready(void)
 {
     return ((PINB & (1 << HX711_DT_BIT)) == 0U);
@@ -335,6 +382,7 @@ static void weight_service(uint32_t now)
     }
 }
 
+// I2C
 static void twi_init(void)
 {
     TWSR = I2C_PRESCALER_BITS;
@@ -353,32 +401,50 @@ static void i2c_update_status(void)
     g_i2c_regs[3] = (uint8_t)(raw_weight >> 16);
     g_i2c_regs[4] = (uint8_t)(raw_weight >> 8);
     g_i2c_regs[5] = (uint8_t)raw_weight;
+    g_i2c_regs[6] = g_button_state;
 }
 
-int main(void)
+/****************************************/
+// Interrupt routines
+
+// Interrupcion del temporizador
+ISR(TIMER0_COMPA_vect)
 {
-    debounce_t button;
-    uint32_t now;
+    g_millis++;
+}
 
-    cli();
-    gpio_init();
-    timer0_millis_init();
-    twi_init();
-    sei();
+// Interrupcion I2C
+ISR(TWI_vect)
+{
+    switch (TWSR & 0xF8U) {
+    case 0x60U:
+    case 0x68U:
+    case 0x70U:
+    case 0x78U:
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
 
-    now = millis_get();
-    debounce_init(&button, button_pressed_raw(), now);
+    case 0x80U:
+    case 0x90U:
+        g_i2c_reg_pointer = TWDR;
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
 
-    for (;;) {
-        now = millis_get();
+    case 0xA0U:
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
 
-        if (debounce_update(&button, button_pressed_raw(), now) &&
-            button.stable_state) {
-            stepper_start_cycle(now);
-        }
+    case 0xA8U:
+    case 0xB0U:
+    case 0xB8U:
+    case 0xC8U:
+        TWDR = g_i2c_regs[g_i2c_reg_pointer % sizeof(g_i2c_regs)];
+        g_i2c_reg_pointer++;
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
 
-        weight_service(now);
-        stepper_service(now);
-        i2c_update_status();
+    default:
+        TWCR = (1 << TWEA) | (1 << TWEN) | (1 << TWIE) | (1 << TWINT);
+        break;
     }
 }

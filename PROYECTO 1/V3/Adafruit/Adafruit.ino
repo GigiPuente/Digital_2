@@ -1,20 +1,36 @@
+/*
+ * Adafruit.ino
+ *
+ * Created:
+ * Author:
+ * Description:
+ */
+/****************************************/
+// Encabezado (Libraries)
+
 #include "WiFi.h"
 #include "AdafruitIO_WiFi.h"
 
+// Credenciales
 #define WIFI_SSID     "Hola Causas"
 #define WIFI_PASS     "Puente2019"
 #define IO_USERNAME   "Gigi_PuenteAF"
 #define IO_KEY        "aio_WhKH42Ekb9O1UvJegBZcYYxmf1C5"
 
+// Configuracion UART
 #define MAESTRO_RX_PIN         16
 #define MAESTRO_TX_PIN         17
 #define MAESTRO_BAUDRATE       9600
 #define SERIAL_BUFFER_SIZE     96
+
+// Configuracion de publicacion
 #define PUBLISH_INTERVAL_MS    15000UL
 
+// Objetos globales de Adafruit IO
 AdafruitIO_WiFi io(IO_USERNAME, IO_KEY, WIFI_SSID, WIFI_PASS);
 AdafruitIO_Group *telemetryGroup = io.group("telemetry");
 
+// Variables globales del ESP32
 char serialBuffer[SERIAL_BUFFER_SIZE];
 uint8_t serialIndex = 0U;
 unsigned long lastPublishMs = 0UL;
@@ -25,8 +41,63 @@ int latestAlarm = 0;
 int latestWeightG = 0;
 int latestStepperState = 0;
 int latestStepperCycles = 0;
+int latestButton = 0;
 bool telemetryDirty = false;
 
+/****************************************/
+// Function prototypes
+
+// Parseo de telemetria
+static bool extractIntField(const char *line, const char *key, int *value);
+static void parseTelemetry(const char *line);
+
+// Publicacion a Adafruit
+static void publishTelemetryIfDue(void);
+
+// Recepcion UART
+static void processMaestroSerial(void);
+
+/****************************************/
+// Main Function
+
+void setup() {
+  Serial.begin(115200);
+  Serial1.begin(MAESTRO_BAUDRATE, SERIAL_8N1, MAESTRO_RX_PIN, MAESTRO_TX_PIN);
+
+  Serial.println();
+  Serial.println("Conectando a Adafruit IO...");
+
+  io.connect();
+
+  while (io.status() < AIO_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  Serial.println();
+  Serial.println(io.statusText());
+  Serial.println("Adafruit IO conectado.");
+
+  // Verificacion del grupo telemetry
+  if (!telemetryGroup->exists()) {
+    Serial.println("Creando grupo telemetry...");
+    telemetryGroup->create();
+  }
+
+  lastPublishMs = millis();
+}
+
+void loop() {
+  // Principal del ESP32
+  io.run();
+  processMaestroSerial();
+  publishTelemetryIfDue();
+}
+
+/****************************************/
+// NON-Interrupt subroutines
+
+// Parseo de telemetria
 static bool extractIntField(const char *line, const char *key, int *value) {
   const char *start = strstr(line, key);
   char *endPtr;
@@ -67,9 +138,14 @@ static void parseTelemetry(const char *line) {
     latestStepperCycles = parsedValue;
   }
 
+  if (extractIntField(line, "button=", &parsedValue)) {
+    latestButton = parsedValue;
+  }
+
   telemetryDirty = true;
 }
 
+// Publicacion a Adafruit
 static void publishTelemetryIfDue(void) {
   if (!telemetryDirty) {
     return;
@@ -85,6 +161,7 @@ static void publishTelemetryIfDue(void) {
   telemetryGroup->set("weight_g", latestWeightG);
   telemetryGroup->set("stepper", latestStepperState);
   telemetryGroup->set("cycles", latestStepperCycles);
+  telemetryGroup->set("button", latestButton);
 
   if (telemetryGroup->save()) {
     Serial.println("Adafruit IO: datos publicados.");
@@ -95,6 +172,7 @@ static void publishTelemetryIfDue(void) {
   }
 }
 
+// Recepcion UART
 static void processMaestroSerial(void) {
   while (Serial1.available() > 0) {
     char incoming = (char)Serial1.read();
@@ -124,34 +202,7 @@ static void processMaestroSerial(void) {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  Serial1.begin(MAESTRO_BAUDRATE, SERIAL_8N1, MAESTRO_RX_PIN, MAESTRO_TX_PIN);
+/****************************************/
+// Interrupt routines
 
-  Serial.println();
-  Serial.println("Conectando a Adafruit IO...");
-
-  io.connect();
-
-  while (io.status() < AIO_CONNECTED) {
-    Serial.print(".");
-    delay(500);
-  }
-
-  Serial.println();
-  Serial.println(io.statusText());
-  Serial.println("Adafruit IO conectado.");
-
-  if (!telemetryGroup->exists()) {
-    Serial.println("Creando grupo telemetry...");
-    telemetryGroup->create();
-  }
-
-  lastPublishMs = millis();
-}
-
-void loop() {
-  io.run();
-  processMaestroSerial();
-  publishTelemetryIfDue();
-}
+// Este programa no usa rutinas de interrupcion.

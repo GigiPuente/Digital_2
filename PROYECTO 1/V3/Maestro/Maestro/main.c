@@ -41,6 +41,8 @@
 #define LM75_TEMP_REGISTER       0x00U
 #define TEMP_STOP_THRESHOLD_C    80
 #define SLAVE_CMD_PAUSE_5S       0xA5U
+#define SLAVE_CMD_STOP_MOTORS    0xB0U
+#define SLAVE_CMD_RESUME_MOTORS  0xB1U
 #define I2C_PRESCALER_BITS       0x03U
 #define I2C_BITRATE_VALUE        12U
 #define TELEMETRY_INTERVAL_MS    1000UL
@@ -63,9 +65,10 @@ static int8_t g_last_temp_c = 0;
 static uint8_t g_temp_valid = 0U;
 static uint8_t g_stepper_cycles = 0U;
 static uint8_t g_stepper_state = 0U;
-static int32_t g_last_weight_g = 0L;
+static uint32_t g_last_detect_ms = 0UL;
 static uint8_t g_stepper_button = 0U;
 static uint8_t g_esclavo2_online = 0U;
+static uint8_t g_motor_stop_active = 0U;
 
 /****************************************/
 // Function prototypes
@@ -109,13 +112,15 @@ static bool read_lm75_temp_c(int8_t *temp_c);
 
 int main(void)
 {
+    uint8_t stop_command_sent = 0U;
+
     gpio_init();
     lcd_init();
     twi_init();
     telemetry_uart_init();
 
     lcd_set_cursor(0U, 0U);
-    lcd_print_padded("PESO CAJAS TEMP");
+    lcd_print_padded("TDET CAJAS TEMP");
     lcd_set_cursor(0U, 1U);
     lcd_print_padded("---- ----- ---");
     _delay_ms(500);
@@ -152,6 +157,18 @@ int main(void)
             g_esclavo2_online = 1U;
         } else {
             g_esclavo2_online = 0U;
+            g_motor_stop_active = 0U;
+        }
+
+        // Paro global por deteccion prolongada del ultrasonico
+        if (g_motor_stop_active) {
+            if (!stop_command_sent) {
+                write_slave_command(SLAVE_CMD_STOP_MOTORS);
+                stop_command_sent = 1U;
+            }
+        } else if (stop_command_sent) {
+            write_slave_command(SLAVE_CMD_RESUME_MOTORS);
+            stop_command_sent = 0U;
         }
 
         // Actualizacion de LCD y telemetria
@@ -209,12 +226,12 @@ static void telemetry_send_frame(void)
 
     snprintf(line,
              sizeof(line),
-             "boxes=%u,temp_c=%d,alarm=%u,i2c=%u,weight_g=%ld,stepper=%u,cycles=%u,button=%u\r\n",
+             "boxes=%u,temp_c=%d,alarm=%u,i2c=%u,detect_ms=%lu,stepper=%u,cycles=%u,button=%u\r\n",
              g_box_count,
              g_temp_valid ? g_last_temp_c : -127,
              g_overtemp_latched,
              g_i2c_online,
-             (long)g_last_weight_g,
+             (unsigned long)g_last_detect_ms,
              g_stepper_state,
              g_stepper_cycles,
              g_stepper_button);
@@ -334,17 +351,23 @@ static void lcd_init(void)
 static void draw_screen(void)
 {
     char line[17];
-    char weight_field[5];
+    char detect_field[5];
     char boxes_field[6];
     char temp_field[4];
+    uint16_t detect_tenths;
 
     lcd_set_cursor(0U, 0U);
-    lcd_print_padded("PESO CAJAS TEMP");
+    lcd_print_padded("TDET CAJAS TEMP");
 
     if (g_esclavo2_online) {
-        snprintf(weight_field, sizeof(weight_field), "%4ld", (long)g_last_weight_g);
+        detect_tenths = (g_last_detect_ms > 9990UL) ? 999U : (uint16_t)((g_last_detect_ms + 50UL) / 100UL);
+        snprintf(detect_field,
+                 sizeof(detect_field),
+                 "%u.%u",
+                 (unsigned int)(detect_tenths / 10U),
+                 (unsigned int)(detect_tenths % 10U));
     } else {
-        snprintf(weight_field, sizeof(weight_field), "----");
+        snprintf(detect_field, sizeof(detect_field), "----");
     }
 
     if (g_i2c_online) {
@@ -359,7 +382,7 @@ static void draw_screen(void)
         snprintf(temp_field, sizeof(temp_field), "---");
     }
 
-    snprintf(line, sizeof(line), "%s %s %s", weight_field, boxes_field, temp_field);
+    snprintf(line, sizeof(line), "%s %s %s", detect_field, boxes_field, temp_field);
     lcd_set_cursor(0U, 1U);
     lcd_print_padded(line);
 }
@@ -505,9 +528,9 @@ static bool read_slave_box_count(uint8_t *count)
 
 static bool read_esclavo2_status(void)
 {
-    uint8_t data[7];
+    uint8_t data[8];
     uint8_t i;
-    uint32_t raw_weight = 0UL;
+    uint32_t raw_detect_ms = 0UL;
 
     if (!twi_start((uint8_t)(ESCLAVO2_I2C_ADDRESS << 1))) {
         twi_stop();
@@ -535,12 +558,13 @@ static bool read_esclavo2_status(void)
 
     g_stepper_cycles = data[0];
     g_stepper_state = data[1];
-    raw_weight = ((uint32_t)data[2] << 24) |
-                 ((uint32_t)data[3] << 16) |
-                 ((uint32_t)data[4] << 8) |
-                 (uint32_t)data[5];
-    g_last_weight_g = (int32_t)raw_weight;
+    raw_detect_ms = ((uint32_t)data[2] << 24) |
+                    ((uint32_t)data[3] << 16) |
+                    ((uint32_t)data[4] << 8) |
+                    (uint32_t)data[5];
+    g_last_detect_ms = raw_detect_ms;
     g_stepper_button = data[6];
+    g_motor_stop_active = data[7];
     return true;
 }
 

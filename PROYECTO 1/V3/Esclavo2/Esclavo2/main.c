@@ -19,41 +19,42 @@
 #include <stdbool.h>
 
 // Pines del stepper
-#define STEPPER_IN1_BIT         PD4
-#define STEPPER_IN2_BIT         PD5
-#define STEPPER_IN3_BIT         PD6
-#define STEPPER_IN4_BIT         PD7
+#define STEPPER_IN1_BIT             PD4
+#define STEPPER_IN2_BIT             PD5
+#define STEPPER_IN3_BIT             PD6
+#define STEPPER_IN4_BIT             PD7
 
-// Pines del HX711 y boton
-#define HX711_DT_BIT            PB0
-#define HX711_SCK_BIT           PB1
-#define BUTTON_BIT              PB2
+// Pines del sensor ultrasonico y boton
+#define ULTRASONIC_TRIG_BIT         PB0
+#define ULTRASONIC_ECHO_BIT         PB1
+#define BUTTON_BIT                  PB2
 
 // Pines I2C
-#define TWI_SDA_BIT             PC4
-#define TWI_SCL_BIT             PC5
+#define TWI_SDA_BIT                 PC4
+#define TWI_SCL_BIT                 PC5
 
 // Direccion y velocidad I2C
-#define I2C_SLAVE_ADDRESS       0x13U
-#define I2C_PRESCALER_BITS      0x03U
-#define I2C_BITRATE_VALUE       12U
+#define I2C_SLAVE_ADDRESS           0x13U
+#define I2C_PRESCALER_BITS          0x03U
+#define I2C_BITRATE_VALUE           12U
 
-// Configuracion del sensor de peso
-#define HX711_SAMPLE_MS         200UL
-#define HX711_OFFSET_COUNTS     0L
-#define HX711_COUNTS_PER_GRAM   1L
-#define WEIGHT_TRIGGER_GRAMS    500L
-#define WEIGHT_REARM_GRAMS      450L
+// Configuracion del sensor ultrasonico
+#define ULTRASONIC_SAMPLE_MS        200UL
+#define ULTRASONIC_MAX_ECHO_US      30000UL
+#define ULTRASONIC_TRIGGER_CM       10L
+#define ULTRASONIC_REARM_CM         15L
+#define ULTRASONIC_DETECT_GRACE_MS  500UL
+#define ULTRASONIC_STOP_HOLD_MS     3000UL
 
 // Configuracion del boton y stepper
-#define BUTTON_DEBOUNCE_MS      30UL
-#define STEPPER_STEP_DELAY_MS   3UL
-#define STEPPER_STEPS_180       1024U
-#define STEPPER_HOLD_MS         3000UL
+#define BUTTON_DEBOUNCE_MS          30UL
+#define STEPPER_STEP_DELAY_MS       3UL
+#define STEPPER_STEPS_180           1024U
+#define STEPPER_HOLD_MS             3000UL
 
 // Variables globales del esclavo 2
 static volatile uint32_t g_millis = 0UL;
-static volatile uint8_t g_i2c_regs[7] = {0U};
+static volatile uint8_t g_i2c_regs[8] = {0U};
 static volatile uint8_t g_i2c_reg_pointer = 0U;
 
 typedef struct {
@@ -75,9 +76,10 @@ static uint16_t g_stepper_steps_remaining = 0U;
 static uint32_t g_stepper_next_step_ms = 0UL;
 static uint32_t g_stepper_hold_until_ms = 0UL;
 static uint8_t g_cycle_count = 0U;
-static int32_t g_last_weight_grams = 0L;
-static uint8_t g_weight_armed = 1U;
+static int32_t g_last_distance_cm = -1L;
 static uint8_t g_button_state = 0U;
+static uint8_t g_stop_active = 0U;
+static uint32_t g_detect_elapsed_ms = 0UL;
 
 /****************************************/
 // Function prototypes
@@ -101,11 +103,11 @@ static void stepper_outputs_off(void);
 static void stepper_apply_phase(uint8_t phase);
 static void stepper_start_cycle(uint32_t now);
 static void stepper_service(uint32_t now);
+static void stepper_force_stop(void);
 
-// Sensor de peso HX711
-static uint8_t hx711_ready(void);
-static int32_t hx711_read_raw(void);
-static void weight_service(uint32_t now);
+// Sensor ultrasonico
+static bool ultrasonic_read_cm(int32_t *distance_cm);
+static void ultrasonic_service(uint32_t now);
 
 // I2C
 static void twi_init(void);
@@ -133,14 +135,17 @@ int main(void)
 
         // Lectura del boton
         g_button_state = button_pressed_raw();
-        if (debounce_update(&button, button_pressed_raw(), now) &&
+        if (!g_stop_active &&
+            debounce_update(&button, button_pressed_raw(), now) &&
             button.stable_state) {
             stepper_start_cycle(now);
         }
 
-        // Lectura del peso y movimiento del stepper
-        weight_service(now);
-        stepper_service(now);
+        // Lectura de distancia y control de paro
+        ultrasonic_service(now);
+        if (!g_stop_active) {
+            stepper_service(now);
+        }
 
         // Actualizacion I2C
         i2c_update_status();
@@ -188,9 +193,9 @@ static void gpio_init(void)
     PORTD &= ~((1 << STEPPER_IN1_BIT) | (1 << STEPPER_IN2_BIT) |
                (1 << STEPPER_IN3_BIT) | (1 << STEPPER_IN4_BIT));
 
-    DDRB &= ~((1 << HX711_DT_BIT) | (1 << BUTTON_BIT));
-    DDRB |= (1 << HX711_SCK_BIT);
-    PORTB &= ~(1 << HX711_SCK_BIT);
+    DDRB |= (1 << ULTRASONIC_TRIG_BIT);
+    DDRB &= ~((1 << ULTRASONIC_ECHO_BIT) | (1 << BUTTON_BIT));
+    PORTB &= ~(1 << ULTRASONIC_TRIG_BIT);
     PORTB |= (1 << BUTTON_BIT);
 
     DDRC &= ~((1 << TWI_SDA_BIT) | (1 << TWI_SCL_BIT));
@@ -309,77 +314,105 @@ static void stepper_service(uint32_t now)
     }
 }
 
-// Sensor de peso HX711
-static uint8_t hx711_ready(void)
+static void stepper_force_stop(void)
 {
-    return ((PINB & (1 << HX711_DT_BIT)) == 0U);
+    g_stepper_state = STEPPER_IDLE;
+    g_stepper_steps_remaining = 0U;
+    stepper_outputs_off();
 }
 
-static int32_t hx711_read_raw(void)
+// Sensor ultrasonico
+static bool ultrasonic_read_cm(int32_t *distance_cm)
 {
-    uint32_t value = 0UL;
-    uint8_t i;
-    uint8_t old_sreg = SREG;
+    uint32_t timeout_us;
+    uint32_t pulse_us = 0UL;
 
-    cli();
+    PORTB &= ~(1 << ULTRASONIC_TRIG_BIT);
+    _delay_us(2);
+    PORTB |= (1 << ULTRASONIC_TRIG_BIT);
+    _delay_us(10);
+    PORTB &= ~(1 << ULTRASONIC_TRIG_BIT);
 
-    for (i = 0U; i < 24U; i++) {
-        PORTB |= (1 << HX711_SCK_BIT);
+    timeout_us = ULTRASONIC_MAX_ECHO_US;
+    while (((PINB & (1 << ULTRASONIC_ECHO_BIT)) == 0U) && (timeout_us > 0UL)) {
         _delay_us(1);
-
-        value <<= 1;
-        if ((PINB & (1 << HX711_DT_BIT)) != 0U) {
-            value |= 1U;
-        }
-
-        PORTB &= ~(1 << HX711_SCK_BIT);
-        _delay_us(1);
+        timeout_us--;
     }
 
-    PORTB |= (1 << HX711_SCK_BIT);
-    _delay_us(1);
-    PORTB &= ~(1 << HX711_SCK_BIT);
-    _delay_us(1);
-
-    SREG = old_sreg;
-
-    if ((value & 0x00800000UL) != 0UL) {
-        value |= 0xFF000000UL;
+    if (timeout_us == 0UL) {
+        return false;
     }
 
-    return (int32_t)value;
+    while (((PINB & (1 << ULTRASONIC_ECHO_BIT)) != 0U) &&
+           (pulse_us < ULTRASONIC_MAX_ECHO_US)) {
+        _delay_us(1);
+        pulse_us++;
+    }
+
+    if ((pulse_us == 0UL) || (pulse_us >= ULTRASONIC_MAX_ECHO_US)) {
+        return false;
+    }
+
+    *distance_cm = (int32_t)((pulse_us + 29UL) / 58UL);
+    return true;
 }
 
-static void weight_service(uint32_t now)
+static void ultrasonic_service(uint32_t now)
 {
     static uint32_t last_sample_ms = 0UL;
-    int32_t raw_counts;
-    int32_t weight_grams;
+    static uint32_t detect_start_ms = 0UL;
+    static uint32_t last_detect_seen_ms = 0UL;
+    static uint8_t detect_active = 0U;
+    int32_t distance_cm;
+    uint8_t distance_valid;
+    uint8_t detected_now;
 
-    if (!interval_elapsed(now, last_sample_ms, HX711_SAMPLE_MS)) {
+    if (!interval_elapsed(now, last_sample_ms, ULTRASONIC_SAMPLE_MS)) {
         return;
     }
 
     last_sample_ms = now;
 
-    if (!hx711_ready()) {
-        return;
+    distance_valid = ultrasonic_read_cm(&distance_cm) ? 1U : 0U;
+    if (distance_valid) {
+        g_last_distance_cm = distance_cm;
+    } else {
+        g_last_distance_cm = -1L;
+        distance_cm = -1L;
     }
 
-    raw_counts = hx711_read_raw();
-    weight_grams = (raw_counts - HX711_OFFSET_COUNTS) / HX711_COUNTS_PER_GRAM;
-    g_last_weight_grams = weight_grams;
+    detected_now = (uint8_t)(distance_valid &&
+                             (distance_cm > 0L) &&
+                             (distance_cm <= ULTRASONIC_TRIGGER_CM));
 
-    if (weight_grams <= WEIGHT_REARM_GRAMS) {
-        g_weight_armed = 1U;
+    if (detected_now) {
+        if (!detect_active) {
+            detect_active = 1U;
+            detect_start_ms = now;
+        }
+
+        last_detect_seen_ms = now;
+        g_detect_elapsed_ms = now - detect_start_ms;
+
+        if (!g_stop_active &&
+            interval_elapsed(now, detect_start_ms, ULTRASONIC_STOP_HOLD_MS)) {
+            g_stop_active = 1U;
+            stepper_force_stop();
+        }
+    } else {
+        if (detect_active &&
+            !interval_elapsed(now, last_detect_seen_ms, ULTRASONIC_DETECT_GRACE_MS)) {
+            g_detect_elapsed_ms = now - detect_start_ms;
+        } else {
+            detect_active = 0U;
+            g_detect_elapsed_ms = 0UL;
+        }
+
+        if (distance_valid && (distance_cm >= ULTRASONIC_REARM_CM)) {
+            g_stop_active = 0U;
+        }
     }
 
-    if (g_weight_armed &&
-        (weight_grams >= WEIGHT_TRIGGER_GRAMS) &&
-        (g_stepper_state == STEPPER_IDLE)) {
-        g_weight_armed = 0U;
-        stepper_start_cycle(now);
-    }
 }
 
 // I2C
@@ -393,15 +426,16 @@ static void twi_init(void)
 
 static void i2c_update_status(void)
 {
-    uint32_t raw_weight = (uint32_t)g_last_weight_grams;
+    uint32_t raw_detect_ms = g_detect_elapsed_ms;
 
     g_i2c_regs[0] = g_cycle_count;
     g_i2c_regs[1] = (uint8_t)g_stepper_state;
-    g_i2c_regs[2] = (uint8_t)(raw_weight >> 24);
-    g_i2c_regs[3] = (uint8_t)(raw_weight >> 16);
-    g_i2c_regs[4] = (uint8_t)(raw_weight >> 8);
-    g_i2c_regs[5] = (uint8_t)raw_weight;
+    g_i2c_regs[2] = (uint8_t)(raw_detect_ms >> 24);
+    g_i2c_regs[3] = (uint8_t)(raw_detect_ms >> 16);
+    g_i2c_regs[4] = (uint8_t)(raw_detect_ms >> 8);
+    g_i2c_regs[5] = (uint8_t)raw_detect_ms;
     g_i2c_regs[6] = g_button_state;
+    g_i2c_regs[7] = g_stop_active;
 }
 
 /****************************************/

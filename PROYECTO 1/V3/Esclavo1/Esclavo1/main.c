@@ -31,7 +31,7 @@
 
 // Tiempos y configuracion
 #define PROX_ACTIVE_LOW   0
-#define SERVO_WAIT_MS     1000UL
+#define SERVO_WAIT_MS     1500UL
 #define SERVO_HOLD_MS     1000UL
 #define DC_STOP_MS        3000UL
 #define SYSTEM_PAUSE_MS   5000UL
@@ -41,6 +41,8 @@
 #define I2C_PRESCALER_BITS 0x03U
 #define I2C_BITRATE_VALUE  12U
 #define SLAVE_CMD_PAUSE_5S 0xA5U
+#define SLAVE_CMD_STOP_MOTORS 0xB0U
+#define SLAVE_CMD_RESUME_MOTORS 0xB1U
 
 // Variables globales esclavo 1
 static volatile uint32_t g_millis = 0UL;
@@ -57,7 +59,7 @@ typedef struct {
 typedef enum {
     SERVO_IDLE = 0,
     SERVO_WAITING,
-    SERVO_AT_90
+    SERVO_AT_180
 } servo_state_t;
 
 static servo_state_t servo_state = SERVO_IDLE;
@@ -67,6 +69,7 @@ static uint32_t g_dc_resume_ms = 0UL;
 static uint8_t g_dc_running = 0U;
 static uint8_t g_system_paused = 0U;
 static uint32_t g_system_pause_until_ms = 0UL;
+static uint8_t g_global_stop_active = 0U;
 
 /****************************************/
 // Function prototypes
@@ -131,6 +134,11 @@ int main(void)
         system_pause_service(now);
 
         if (g_system_paused) {
+            i2c_update_status();
+            continue;
+        }
+
+        if (g_global_stop_active) {
             i2c_update_status();
             continue;
         }
@@ -253,7 +261,7 @@ static void servo_set_degrees(uint8_t degrees)
     OCR1A = (uint16_t)(pulse_us * 2U);
 
     // Contador de cajas
-    if ((degrees == 90U) && (g_servo_position_deg != 90U)) {
+    if ((degrees == 180U) && (g_servo_position_deg != 180U)) {
         g_box_count++;
     }
 
@@ -272,10 +280,10 @@ static void servo_service(uint32_t now)
 {
     if ((servo_state == SERVO_WAITING) && time_reached(now, servo_deadline_ms)) {
         dc_motor_pause(now);
-        servo_set_degrees(90U);
-        servo_state = SERVO_AT_90;
+        servo_set_degrees(180U);
+        servo_state = SERVO_AT_180;
         servo_deadline_ms = now + SERVO_HOLD_MS;
-    } else if ((servo_state == SERVO_AT_90) && time_reached(now, servo_deadline_ms)) {
+    } else if ((servo_state == SERVO_AT_180) && time_reached(now, servo_deadline_ms)) {
         servo_set_degrees(0U);
         servo_state = SERVO_IDLE;
     }
@@ -334,6 +342,14 @@ static void system_pause_service(uint32_t now)
     if (command == SLAVE_CMD_PAUSE_5S) {
         g_i2c_rx_command = 0U;
         system_pause_start(now);
+    } else if (command == SLAVE_CMD_STOP_MOTORS) {
+        g_i2c_rx_command = 0U;
+        g_global_stop_active = 1U;
+        dc_motor_set(0U);
+    } else if (command == SLAVE_CMD_RESUME_MOTORS) {
+        g_i2c_rx_command = 0U;
+        g_global_stop_active = 0U;
+        g_dc_resume_ms = now;
     }
 
     if (g_system_paused && time_reached(now, g_system_pause_until_ms)) {

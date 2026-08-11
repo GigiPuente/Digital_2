@@ -15,7 +15,7 @@
 #define WIFI_SSID     "Hola Causas"
 #define WIFI_PASS     "Puente2019"
 #define IO_USERNAME   "Gigi_PuenteAF"
-#define IO_KEY        "aio_WhKH42Ekb9O1UvJegBZcYYxmf1C5"
+#define IO_KEY        "aio_skJP090sMGJPvZjquLp2C6tYd7tE"
 
 // Configuracion UART
 #define MAESTRO_RX_PIN         16
@@ -38,7 +38,8 @@ unsigned long lastPublishMs = 0UL;
 int latestBoxes = 0;
 int latestTempC = -127;
 int latestAlarm = 0;
-int latestWeightG = 0;
+int latestDetectMs = 0;
+float latestDetectS = 0.0f;
 int latestStepperState = 0;
 int latestStepperCycles = 0;
 int latestButton = 0;
@@ -126,8 +127,9 @@ static void parseTelemetry(const char *line) {
     latestAlarm = parsedValue;
   }
 
-  if (extractIntField(line, "weight_g=", &parsedValue)) {
-    latestWeightG = parsedValue;
+  if (extractIntField(line, "detect_ms=", &parsedValue)) {
+    latestDetectMs = parsedValue;
+    latestDetectS = ((float)latestDetectMs) / 1000.0f;
   }
 
   if (extractIntField(line, "stepper=", &parsedValue)) {
@@ -158,7 +160,8 @@ static void publishTelemetryIfDue(void) {
   telemetryGroup->set("boxes", latestBoxes);
   telemetryGroup->set("temp_c", latestTempC);
   telemetryGroup->set("alarm", latestAlarm);
-  telemetryGroup->set("weight_g", latestWeightG);
+  telemetryGroup->set("detect_ms", latestDetectMs);
+  telemetryGroup->set("detect_s", latestDetectS);
   telemetryGroup->set("stepper", latestStepperState);
   telemetryGroup->set("cycles", latestStepperCycles);
   telemetryGroup->set("button", latestButton);

@@ -1,0 +1,10 @@
+../Core/Src/main.c:98:5:main	8	static
+../Core/Src/main.c:336:6:SystemClock_Config	88	static
+../Core/Src/main.c:389:13:MX_GPIO_Init	48	static
+../Core/Src/main.c:480:6:HAL_GPIO_EXTI_Callback	24	static
+../Core/Src/main.c:534:6:Display_Apagar	8	static
+../Core/Src/main.c:557:6:Display_Numero	16	static
+../Core/Src/main.c:689:6:actz_LEDs_J1	16	static
+../Core/Src/main.c:722:6:actz_LEDs_J2	16	static
+../Core/Src/main.c:755:6:Reset_Juego	8	static
+../Core/Src/main.c:779:6:Error_Handler	4	static,ignoring_inline_asm

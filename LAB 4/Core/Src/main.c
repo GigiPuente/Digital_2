@@ -141,7 +141,7 @@ int main(void)
         {
           flag_inicio = 0;
 
-          // Reiniciar todo antes de comenzar
+          // Reiniciar todo
           Reset_Juego();
 
           // Pasar a la cuenta regresiva
@@ -153,11 +153,11 @@ int main(void)
 
       case Estado_Cuenta_Regresiva:
 
-        // Bloquear cualquier pulsacion previa de los jugadores
+        // Bloquear botones
         flag_btnJ1 = 0;
         flag_btnJ2 = 0;
 
-        // Mostrar 5
+        // 5
         Display_Numero(5);
         HAL_Delay(1000);
 
@@ -284,7 +284,7 @@ int main(void)
           flag_btnJ1 = 0;
           flag_btnJ2 = 0;
 
-          // Finalizar la carrera
+          // Fin
           estado_juego = Estado_Ganador;
         }
 

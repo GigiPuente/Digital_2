@@ -127,19 +127,19 @@ int main(void)
   MX_TIM4_Init();
 
   /* USER CODE BEGIN 2 */
-  //Iniciar la captura de frecuencia en TIM2
+  //Captura de frecuencia TIM2
   if (HAL_TIM_IC_Start_IT(&htim2, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
 
-  //Iniciar la señal de 500 milisegundos en TIM3
+  //Señal de 500ms TIM3
   if (HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
   }
 
-  //Iniciar la señal de 2 segundos en TIM4
+  //Señal de 2s TIM4
   if (HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1) != HAL_OK)
   {
     Error_Handler();
@@ -147,8 +147,8 @@ int main(void)
 
   //Enviar el mensaje inicial por UART
   HAL_UART_Transmit(&huart2,
-                    (uint8_t *)"Sistema iniciado\r\n",
-                    sizeof("Sistema iniciado\r\n") - 1U,
+                    (uint8_t *)"Iniciado\r\n",
+                    sizeof("Iniciado\r\n") - 1U,
                     HAL_MAX_DELAY);
   /* USER CODE END 2 */
 
@@ -551,7 +551,7 @@ static void Frecuencia_UART(void)
       (periodo_local != 0U) &&
       ((HAL_GetTick() - tiempo_flanco_local) <= Timeout_ms))
   {
-    //Calcular la frecuencia (2 decimales)
+    //Calcular la frecuencia
     frecuencia_centesimas =
         (((uint64_t)Contador_f * 100ULL) +
          ((uint64_t)periodo_local / 2ULL)) /

@@ -37,11 +37,11 @@ Idx Name          Size      VMA       LMA       File off  Algn
                   CONTENTS, READONLY, DEBUGGING, OCTETS
  16 .debug_macro  00022183  00000000  00000000  0001303e  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 17 .debug_line   0000b319  00000000  00000000  000351c1  2**0
+ 17 .debug_line   0000b318  00000000  00000000  000351c1  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 18 .debug_str    000d49db  00000000  00000000  000404da  2**0
+ 18 .debug_str    000d49db  00000000  00000000  000404d9  2**0
                   CONTENTS, READONLY, DEBUGGING, OCTETS
- 19 .comment      00000043  00000000  00000000  00114eb5  2**0
+ 19 .comment      00000043  00000000  00000000  00114eb4  2**0
                   CONTENTS, READONLY
  20 .debug_frame  00002040  00000000  00000000  00114ef8  2**2
                   CONTENTS, READONLY, DEBUGGING, OCTETS
@@ -422,11 +422,8 @@ int main(void)
   UART2_EnviarTexto("Sistema STM32 iniciado\r\n");
  8000562:	4862      	ldr	r0, [pc, #392]	@ (80006ec <main+0x1ac>)
  8000564:	f000 faa8 	bl	8000ab8 <UART2_EnviarTexto>
-  /*
-   * El ADC usa DMA circular, pero no necesita interrupciones para actualizar
-   * adc[]. Se deshabilita su IRQ para evitar saturar el procesador con un
-   * buffer de solamente dos conversiones.
-   */
+
+  //Deshabilitar interrupcion del DMA
   HAL_NVIC_DisableIRQ(DMA2_Stream0_IRQn);
  8000568:	2038      	movs	r0, #56	@ 0x38
  800056a:	f001 fae2 	bl	8001b32 <HAL_NVIC_DisableIRQ>
@@ -458,11 +455,8 @@ int main(void)
   UART2_EnviarTexto("ADC DMA iniciado\r\n");
  8000598:	4859      	ldr	r0, [pc, #356]	@ (8000700 <main+0x1c0>)
  800059a:	f000 fa8d 	bl	8000ab8 <UART2_EnviarTexto>
-  /*
-   * USART1 recibe desde el Nano mediante interrupcion.
-   * USART1_RX debe estar configurado en PA10 y su manejador de interrupcion
-   * debe llamar a HAL_UART_IRQHandler(&huart1).
-   */
+
+  //Habilitar recepcion del Nano
   HAL_NVIC_SetPriority(USART1_IRQn, 1U, 0U);
  800059e:	2200      	movs	r2, #0
  80005a0:	2101      	movs	r1, #1
@@ -506,10 +500,7 @@ int main(void)
  80005da:	4a4f      	ldr	r2, [pc, #316]	@ (8000718 <main+0x1d8>)
  80005dc:	6013      	str	r3, [r2, #0]
 
-    /*
-     * Copia de forma segura el mensaje recibido desde la interrupcion.
-     * El mensaje se reenvia a la computadora mediante USART2.
-     */
+    //Reenviar mensaje del Nano
     if (nano_mensaje_listo != 0U)
  80005de:	4b4f      	ldr	r3, [pc, #316]	@ (800071c <main+0x1dc>)
  80005e0:	781b      	ldrb	r3, [r3, #0]
@@ -553,7 +544,7 @@ int main(void)
  800061c:	f000 fa4c 	bl	8000ab8 <UART2_EnviarTexto>
     }
 
-    /* ADC1: 0-2048 = Abajo; 2049-4095 = Arriba */
+    //ADC1 Abajo o Arriba
     estado_ADC1 = (adc[0] > MITAD_ADC) ? 1U : 0U;
  8000620:	4b33      	ldr	r3, [pc, #204]	@ (80006f0 <main+0x1b0>)
  8000622:	881b      	ldrh	r3, [r3, #0]
@@ -616,7 +607,7 @@ int main(void)
  8000686:	7013      	strb	r3, [r2, #0]
     }
 
-    /* ADC2: 0-2048 = Izquierda; 2049-4095 = Derecha */
+    //ADC2 Izquierda o Derecha
     estado_ADC2 = (adc[1] > MITAD_ADC) ? 1U : 0U;
  8000688:	4b19      	ldr	r3, [pc, #100]	@ (80006f0 <main+0x1b0>)
  800068a:	885b      	ldrh	r3, [r3, #2]
@@ -1008,7 +999,7 @@ static void MX_USART1_UART_Init(void)
  80008f8:	4b11      	ldr	r3, [pc, #68]	@ (8000940 <MX_USART1_UART_Init+0x4c>)
  80008fa:	4a12      	ldr	r2, [pc, #72]	@ (8000944 <MX_USART1_UART_Init+0x50>)
  80008fc:	601a      	str	r2, [r3, #0]
-  /* Enlace Nano -> STM32 mediante el conversor de nivel I2C. */
+  //Enlace UART con el Nano
   huart1.Init.BaudRate = 9600;
  80008fe:	4b10      	ldr	r3, [pc, #64]	@ (8000940 <MX_USART1_UART_Init+0x4c>)
  8000900:	f44f 5216 	mov.w	r2, #9600	@ 0x2580
@@ -1302,9 +1293,9 @@ static void MX_GPIO_Init(void)
 
 08000ab8 <UART2_EnviarTexto>:
 
-/**
-  * @brief Envia una cadena por USART2 hacia la terminal de la computadora.
-  */
+/* USER CODE BEGIN 4 */
+
+//Enviar texto por USART2
 void UART2_EnviarTexto(const char *texto)
 {
  8000ab8:	b580      	push	{r7, lr}
@@ -1333,9 +1324,7 @@ void UART2_EnviarTexto(const char *texto)
 
 08000ae0 <HAL_UART_RxCpltCallback>:
 
-/**
-  * @brief Se ejecuta cada vez que USART1 recibe un byte desde el Nano.
-  */
+//Procesar cada byte del Nano
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
  8000ae0:	b580      	push	{r7, lr}
@@ -1357,13 +1346,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
  8000af4:	781b      	ldrb	r3, [r3, #0]
  8000af6:	73bb      	strb	r3, [r7, #14]
 
-    /* El Nano envia cada mensaje terminado en \r\n. */
+    //Detectar el final del mensaje
     if (caracter == '\n')
  8000af8:	7bbb      	ldrb	r3, [r7, #14]
  8000afa:	2b0a      	cmp	r3, #10
  8000afc:	d12f      	bne.n	8000b5e <HAL_UART_RxCpltCallback+0x7e>
     {
-      /* Ignora lineas vacias y solo publica mensajes con contenido. */
+      //Ignorar mensajes vacios
       if ((nano_rx_index > 0U) && (nano_mensaje_listo == 0U))
  8000afe:	4b2b      	ldr	r3, [pc, #172]	@ (8000bac <HAL_UART_RxCpltCallback+0xcc>)
  8000b00:	781b      	ldrb	r3, [r3, #0]
@@ -1460,7 +1449,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       }
       else
       {
-        /* Descarta una linea demasiado larga. */
+        //Descartar mensajes largos
         nano_rx_index = 0U;
  8000b8c:	4b07      	ldr	r3, [pc, #28]	@ (8000bac <HAL_UART_RxCpltCallback+0xcc>)
  8000b8e:	2200      	movs	r2, #0
@@ -1468,7 +1457,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
       }
     }
 
-    /* Prepara la recepcion del siguiente byte. */
+    //Recibir el siguiente byte
     HAL_UART_Receive_IT(&huart1, &nano_rx_byte, 1U);
  8000b92:	2201      	movs	r2, #1
  8000b94:	4904      	ldr	r1, [pc, #16]	@ (8000ba8 <HAL_UART_RxCpltCallback+0xc8>)
@@ -1491,9 +1480,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 
 08000bc4 <HAL_UART_ErrorCallback>:
 
-/**
-  * @brief Reinicia la recepcion si USART1 detecta ruido u overrun.
-  */
+//Reinicia USART1 si ocurre un error
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
  8000bc4:	b580      	push	{r7, lr}

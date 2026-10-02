@@ -32,6 +32,7 @@
 typedef struct
 {
   int16_t x;
+  int16_t vx;
   int32_t y_fp;
   int32_t vy_fp;
   bool on_ground;
@@ -44,6 +45,15 @@ typedef struct
   int16_t ancho;
   int16_t alto;
 } Plataforma_t;
+
+typedef struct
+{
+  int16_t x;
+  int16_t y;
+  int8_t dx;
+  int8_t dy;
+  bool activo;
+} DisparoBoss_t;
 
 typedef enum
 {
@@ -85,6 +95,11 @@ typedef enum
 #define BOSS_ALTO                 36
 #define BOSS_Y                    45
 #define BOSS_SPEED                 1
+#define BOSS_DISPAROS_MAX          8U
+#define BOSS_DISPARO_ANCHO         5
+#define BOSS_DISPARO_ALTO          8
+#define BOSS_DISPARO_MS           320U
+#define JUGADOR_VIDA_MAX            3U
 #define DISPARO_ANCHO              3
 #define DISPARO_ALTO               8
 #define DISPARO_SPEED              6
@@ -92,11 +107,19 @@ typedef enum
 #define PISTOLA_Y                 198
 #define PISTOLA_ANCHO              18
 #define PISTOLA_ALTO                9
+#define FONDO1_ANCHO                20
+#define FONDO1_ALTO                 16
+#define FONDO1_ESCALA_X             16
+#define FONDO1_ESCALA_Y             15
 
 #define FP_SHIFT                  8
 #define FP_UNO                    (1L << FP_SHIFT)
 #define GRAVEDAD_FP               50L
-#define JUMP_SPEED_FP             (-1792L)
+#define JUMP_MIN_SPEED_FP         (-512L)
+#define JUMP_MAX_SPEED_FP         (-1792L)
+#define JUMP_MIN_SPEED_X             1
+#define JUMP_MAX_SPEED_X             3
+#define JUMP_CHARGE_MS             700U
 #define MAX_FALL_SPEED_FP         2048L
 #define FRAME_TIME_MS             16U
 
@@ -125,6 +148,9 @@ typedef enum
 /* USER CODE BEGIN PV */
 static Jugador_t jugador;
 static bool jump_apachado = false;
+static bool salto_cargando = false;
+static uint32_t salto_inicio = 0U;
+static int8_t salto_direccion = 0;
 static Estado_t estado_actual = ESTADO_MENU;
 static uint8_t opcion_menu = MENU_EMPEZAR;
 static bool left_anterior = false;
@@ -146,11 +172,51 @@ static int16_t disparo_y = 0;
 static int16_t disparo_dx = 0;
 static int16_t disparo_dy = 0;
 static bool tiene_pistola = false;
+static DisparoBoss_t disparos_boss[BOSS_DISPAROS_MAX];
+static uint32_t proximo_disparo_boss = 0U;
+static uint8_t patron_disparo_boss = 0U;
+static uint8_t vida_jugador = 0U;
 static const uint16_t colores_pantalla[TOTAL_PANTALLAS] = {
   0x10A6U, 0x2149U, 0x3128U, 0x1803U,
   0x0328U, 0x03CBU, 0x046DU, 0x0183U,
   0x4008U, 0x600CU, 0x8010U, 0x2004U
 };
+static const uint16_t fondo_pantalla_1[] = {
+  0x18c1, 0x1901, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
+  0x2981, 0x1901, 0x1901, 0x1901, 0x1080, 0x1080, 0x1080, 0x1080, 0x1080, 0x1080,
+  0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
+  0x2981, 0x2981, 0x2981, 0x2981, 0x31c2, 0x3a42, 0x3a42, 0x3a42, 0x3a42, 0x31c2,
+  0x18c1, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840,
+  0x1080, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x1080, 0x1080, 0x1080, 0x1080,
+  0x1080, 0x1080, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
+  0x1901, 0x1901, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
+  0x18c1, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901,
+  0x1901, 0x1901, 0x2141, 0x2141, 0x2141, 0x2981, 0x2981, 0x2981, 0x2141, 0x2141,
+  0x1901, 0x1901, 0x1901, 0x18c1, 0x18c1, 0x18c1, 0x1901, 0x2141, 0x1901, 0x1901,
+  0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x1080, 0x1080, 0x1080, 0x1080, 0x1080,
+  0x2981, 0x1901, 0x2981, 0x2981, 0x2981, 0x1901, 0x18c1, 0x1080, 0x1080, 0x1080,
+  0x1080, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
+  0x18c1, 0x1901, 0x2141, 0x2141, 0x2141, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
+  0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x18c1, 0x18c1, 0x18c1,
+  0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x1080, 0x0840, 0x0840, 0x0840,
+  0x0840, 0x18c1, 0x1901, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
+  0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
+  0x2981, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x2981, 0x2981, 0x2981,
+  0x2981, 0x31c2, 0x31c2, 0x31c2, 0x31c2, 0x3a42, 0x3a42, 0x3a42, 0x31c2, 0x31c2,
+  0x2981, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
+  0x18c1, 0x18c1, 0x4a83, 0x2981, 0x2981, 0x18c1, 0x2981, 0x2981, 0x2981, 0x2981,
+  0x4a83, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303,
+  0x2981, 0x1080, 0x1080, 0x1080, 0x1080, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840,
+  0x1080, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840,
+  0x18c1, 0x31c2, 0x3a42, 0x3a42, 0x3a42, 0x3a42, 0x31c2, 0x2981, 0x2981, 0x2981,
+  0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
+  0x2981, 0x2981, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
+  0x18c1, 0x1901, 0x18c1, 0x18c1, 0x18c1, 0x1901, 0x1901, 0x2981, 0x2981, 0x1901,
+  0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x1901, 0x2141, 0x2981, 0x2981, 0x18c1,
+  0x1080, 0x0840, 0x0840, 0x0840, 0x0840, 0x1080, 0x18c1, 0x18c1, 0x18c1, 0x18c1
+};
+_Static_assert((sizeof(fondo_pantalla_1) / sizeof(fondo_pantalla_1[0])) ==
+               (FONDO1_ANCHO * FONDO1_ALTO), "Fondo invalido");
 static const Plataforma_t plataformas[TOTAL_PANTALLAS][PLATAFORMAS_PANTALLA] = {
   {
     {25, 170, 90, 8},
@@ -303,7 +369,11 @@ static bool Game_BossActivo(void);
 static bool Game_PlataformasActivas(void);
 static uint8_t Game_VidaMaximaBoss(void);
 static void Game_BossInit(void);
-static bool Game_ActualizarBoss(bool disparar);
+static void Game_LimpiarDisparosBoss(void);
+static void Game_CrearDisparoBoss(void);
+static void Game_DibujarDisparosBoss(void);
+static bool Game_ActualizarDisparosBoss(void);
+static bool Game_ActualizarBoss(bool disparar, bool *golpeado);
 static bool Game_JugadorTocaPistola(int16_t x, int16_t y);
 static bool Game_DisparoTocaPlataforma(void);
 static void Game_IniciarDisparo(void);
@@ -311,9 +381,12 @@ static void Game_ActualizarDisparo(bool disparar);
 static void Game_DibujarPlataforma(const Plataforma_t *plataforma);
 static void Game_DibujarBoss(void);
 static void Game_DibujarVidaBoss(void);
+static void Game_DibujarVidaJugador(void);
 static void Game_DibujarDisparo(void);
 static void Game_DibujarPistola(void);
 static void Game_BorrarDisparo(int16_t x, int16_t y);
+static void Game_DibujarFondoPantalla1(void);
+static void Game_RestaurarFondo(int16_t x, int16_t y, int16_t ancho, int16_t alto);
 static void Game_DibujarFondo(void);
 static void Game_DibujarJugador(int16_t x, int16_t y);
 static void Game_BorrarJugador(int16_t x, int16_t y);
@@ -809,6 +882,7 @@ static int16_t Game_ResolverVertical(int16_t old_y, int16_t new_y)
     if (colision)
     {
       jugador.vy_fp = 0L;
+      jugador.vx = 0;
       jugador.on_ground = true;
       return superficie - JUGADOR_ALTO;
     }
@@ -878,9 +952,98 @@ static void Game_BossInit(void)
   boss_x = (LCD_ANCHO - BOSS_ANCHO) / 2;
   boss_direccion = 1;
   boss_vida = Game_VidaMaximaBoss();
+  vida_jugador = JUGADOR_VIDA_MAX;
   disparo_activo = false;
   disparo_dx = 0;
   disparo_dy = 0;
+  Game_LimpiarDisparosBoss();
+  patron_disparo_boss = 0U;
+  proximo_disparo_boss = HAL_GetTick() + 500U;
+}
+
+static void Game_LimpiarDisparosBoss(void)
+{
+  memset(disparos_boss, 0, sizeof(disparos_boss));
+}
+
+static void Game_CrearDisparoBoss(void)
+{
+  static const int8_t direcciones[5] = {-2, 2, -1, 1, 0};
+
+  for (uint8_t i = 0U; i < BOSS_DISPAROS_MAX; i++)
+  {
+    if (!disparos_boss[i].activo)
+    {
+      disparos_boss[i].x = boss_x + ((BOSS_ANCHO - BOSS_DISPARO_ANCHO) / 2);
+      disparos_boss[i].y = BOSS_Y + BOSS_ALTO;
+      disparos_boss[i].dx = direcciones[patron_disparo_boss % 5U];
+      disparos_boss[i].dy = 3;
+      disparos_boss[i].activo = true;
+      patron_disparo_boss++;
+      return;
+    }
+  }
+}
+
+static void Game_DibujarDisparosBoss(void)
+{
+  for (uint8_t i = 0U; i < BOSS_DISPAROS_MAX; i++)
+  {
+    if (disparos_boss[i].activo)
+    {
+      LCD_Llenar_Rect(disparos_boss[i].x, disparos_boss[i].y,
+                      BOSS_DISPARO_ANCHO, BOSS_DISPARO_ALTO,
+                      COLOR_JUGADOR);
+    }
+  }
+}
+
+static bool Game_ActualizarDisparosBoss(void)
+{
+  bool golpeado = false;
+  int16_t jugador_y = (int16_t)(jugador.y_fp >> FP_SHIFT);
+  uint16_t fondo = colores_pantalla[pantalla_actual];
+
+  for (uint8_t i = 0U; i < BOSS_DISPAROS_MAX; i++)
+  {
+    DisparoBoss_t *disparo = &disparos_boss[i];
+
+    if (!disparo->activo)
+    {
+      continue;
+    }
+
+    LCD_Llenar_Rect(disparo->x, disparo->y,
+                    BOSS_DISPARO_ANCHO, BOSS_DISPARO_ALTO, fondo);
+    disparo->x = (int16_t)(disparo->x + disparo->dx);
+    disparo->y = (int16_t)(disparo->y + disparo->dy);
+
+    if ((disparo->x >= LCD_ANCHO) ||
+        ((disparo->x + BOSS_DISPARO_ANCHO) < 0) ||
+        ((disparo->y + BOSS_DISPARO_ALTO) >= PISO_Y))
+    {
+      disparo->activo = false;
+      continue;
+    }
+
+    if (((disparo->x + BOSS_DISPARO_ANCHO) > jugador.x) &&
+        (disparo->x < (jugador.x + JUGADOR_ANCHO)) &&
+        ((disparo->y + BOSS_DISPARO_ALTO) > jugador_y) &&
+        (disparo->y < (jugador_y + JUGADOR_ALTO)))
+    {
+      disparo->activo = false;
+      golpeado = true;
+    }
+  }
+
+  if ((int32_t)(HAL_GetTick() - proximo_disparo_boss) >= 0)
+  {
+    Game_CrearDisparoBoss();
+    proximo_disparo_boss = HAL_GetTick() + BOSS_DISPARO_MS;
+  }
+
+  Game_DibujarDisparosBoss();
+  return golpeado;
 }
 
 static bool Game_JugadorTocaPistola(int16_t x, int16_t y)
@@ -987,6 +1150,23 @@ static void Game_DibujarVidaBoss(void)
   LCD_Llenar_Rect(72, 9, ancho, 8, COLOR_BOSS_OJOS);
 }
 
+static void Game_DibujarVidaJugador(void)
+{
+  uint16_t fondo = colores_pantalla[pantalla_actual];
+
+  LCD_Llenar_Rect(180, 5, 130, 16, fondo);
+  LCD_DibujarTexto(180, 8, "VIDA", 1U, COLOR_BLANCO, fondo);
+
+  for (uint8_t i = 0U; i < JUGADOR_VIDA_MAX; i++)
+  {
+    int16_t x = (int16_t)(210 + (i * 15U));
+
+    LCD_Llenar_Rect(x, 7, 12, 12, COLOR_NEGRO);
+    LCD_Llenar_Rect(x + 2, 9, 8, 8,
+                    (i < vida_jugador) ? COLOR_JUGADOR : fondo);
+  }
+}
+
 static void Game_DibujarDisparo(void)
 {
   if (disparo_activo)
@@ -1010,8 +1190,7 @@ static void Game_DibujarPistola(void)
 
 static void Game_BorrarDisparo(int16_t x, int16_t y)
 {
-  LCD_Llenar_Rect(x, y, DISPARO_ANCHO, DISPARO_ALTO,
-                  colores_pantalla[pantalla_actual]);
+  Game_RestaurarFondo(x, y, DISPARO_ANCHO, DISPARO_ALTO);
 
   if (((pantalla_actual == 0U) || Game_EsPantallaBoss()) &&
       ((y + DISPARO_ALTO) > PISO_Y))
@@ -1057,13 +1236,15 @@ static void Game_ActualizarDisparo(bool disparar)
   Game_DibujarDisparo();
 }
 
-static bool Game_ActualizarBoss(bool disparar)
+static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
 {
   int16_t boss_x_anterior = boss_x;
   int16_t disparo_x_anterior = disparo_x;
   int16_t disparo_y_anterior = disparo_y;
   bool disparo_anterior = disparo_activo;
   uint16_t fondo = colores_pantalla[pantalla_actual];
+
+  *golpeado = false;
 
   LCD_Llenar_Rect(boss_x_anterior, BOSS_Y, BOSS_ANCHO, BOSS_ALTO, fondo);
   if (disparo_anterior)
@@ -1082,6 +1263,12 @@ static bool Game_ActualizarBoss(bool disparar)
   {
     boss_x = LCD_ANCHO - BOSS_ANCHO - 12;
     boss_direccion = -1;
+  }
+
+  *golpeado = Game_ActualizarDisparosBoss();
+  if (*golpeado)
+  {
+    return false;
   }
 
   if (disparar)
@@ -1108,6 +1295,7 @@ static bool Game_ActualizarBoss(bool disparar)
       if (boss_vida == 0U)
       {
         bosses_derrotados[Game_IndiceBoss()] = true;
+        Game_LimpiarDisparosBoss();
         return true;
       }
     }
@@ -1119,13 +1307,79 @@ static bool Game_ActualizarBoss(bool disparar)
 
   Game_DibujarBoss();
   Game_DibujarVidaBoss();
+  Game_DibujarVidaJugador();
   Game_DibujarDisparo();
   return false;
 }
 
+static void Game_DibujarFondoPantalla1(void)
+{
+  for (int16_t fila = 0; fila < FONDO1_ALTO; fila++)
+  {
+    for (int16_t columna = 0; columna < FONDO1_ANCHO; columna++)
+    {
+      uint16_t color = fondo_pantalla_1[(fila * FONDO1_ANCHO) + columna];
+
+      LCD_Llenar_Rect(columna * FONDO1_ESCALA_X,
+                      fila * FONDO1_ESCALA_Y,
+                      FONDO1_ESCALA_X, FONDO1_ESCALA_Y, color);
+    }
+  }
+}
+
+static void Game_RestaurarFondo(int16_t x, int16_t y, int16_t ancho, int16_t alto)
+{
+  if (pantalla_actual != 0U)
+  {
+    LCD_Llenar_Rect(x, y, ancho, alto, colores_pantalla[pantalla_actual]);
+    return;
+  }
+
+  int16_t x0 = (x < 0) ? 0 : x;
+  int16_t y0 = (y < 0) ? 0 : y;
+  int16_t x1 = ((x + ancho) > LCD_ANCHO) ? LCD_ANCHO : (x + ancho);
+  int16_t y1 = ((y + alto) > LCD_ALTO) ? LCD_ALTO : (y + alto);
+
+  if ((x0 >= x1) || (y0 >= y1))
+  {
+    return;
+  }
+
+  int16_t fila_inicial = y0 / FONDO1_ESCALA_Y;
+  int16_t fila_final = (y1 - 1) / FONDO1_ESCALA_Y;
+  int16_t columna_inicial = x0 / FONDO1_ESCALA_X;
+  int16_t columna_final = (x1 - 1) / FONDO1_ESCALA_X;
+
+  for (int16_t fila = fila_inicial; fila <= fila_final; fila++)
+  {
+    for (int16_t columna = columna_inicial; columna <= columna_final; columna++)
+    {
+      int16_t celda_x0 = columna * FONDO1_ESCALA_X;
+      int16_t celda_y0 = fila * FONDO1_ESCALA_Y;
+      int16_t celda_x1 = celda_x0 + FONDO1_ESCALA_X;
+      int16_t celda_y1 = celda_y0 + FONDO1_ESCALA_Y;
+      int16_t area_x0 = (x0 > celda_x0) ? x0 : celda_x0;
+      int16_t area_y0 = (y0 > celda_y0) ? y0 : celda_y0;
+      int16_t area_x1 = (x1 < celda_x1) ? x1 : celda_x1;
+      int16_t area_y1 = (y1 < celda_y1) ? y1 : celda_y1;
+      uint16_t color = fondo_pantalla_1[(fila * FONDO1_ANCHO) + columna];
+
+      LCD_Llenar_Rect(area_x0, area_y0,
+                      area_x1 - area_x0, area_y1 - area_y0, color);
+    }
+  }
+}
+
 static void Game_DibujarFondo(void)
 {
-  LCD_Llenar_Pantalla(colores_pantalla[pantalla_actual]);
+  if (pantalla_actual == 0U)
+  {
+    Game_DibujarFondoPantalla1();
+  }
+  else
+  {
+    LCD_Llenar_Pantalla(colores_pantalla[pantalla_actual]);
+  }
 
   if (Game_PlataformasActivas())
   {
@@ -1146,7 +1400,9 @@ static void Game_DibujarFondo(void)
   if (Game_BossActivo())
   {
     Game_DibujarVidaBoss();
+    Game_DibujarVidaJugador();
     Game_DibujarDisparo();
+    Game_DibujarDisparosBoss();
   }
 }
 
@@ -1175,8 +1431,7 @@ static void Game_DibujarJugador(int16_t x, int16_t y)
 
 static void Game_BorrarJugador(int16_t x, int16_t y)
 {
-  LCD_Llenar_Rect(x, y, JUGADOR_ANCHO, JUGADOR_ALTO,
-                  colores_pantalla[pantalla_actual]);
+  Game_RestaurarFondo(x, y, JUGADOR_ANCHO, JUGADOR_ALTO);
 
   if (Game_PlataformasActivas())
   {
@@ -1210,10 +1465,14 @@ static void Game_Init(void)
 {
   pantalla_actual = 0U;
   jugador.x = (LCD_ANCHO - JUGADOR_ANCHO) / 2;
+  jugador.vx = 0;
   jugador.y_fp = (int32_t)(PISO_Y - JUGADOR_ALTO) * FP_UNO;
   jugador.vy_fp = 0L;
   jugador.on_ground = true;
   jump_apachado = false;
+  salto_cargando = false;
+  salto_inicio = 0U;
+  salto_direccion = 0;
   jugador_frame = 0U;
   jugador_mira_derecha = true;
   proximo_frame_caminata = HAL_GetTick() + WALK_FRAME_MS;
@@ -1224,6 +1483,10 @@ static void Game_Init(void)
   disparo_dy = 0;
   tiene_pistola = false;
   shoot_anterior = false;
+  Game_LimpiarDisparosBoss();
+  proximo_disparo_boss = 0U;
+  patron_disparo_boss = 0U;
+  vida_jugador = 0U;
 
   Game_DibujarFondo();
   Game_DibujarJugador(jugador.x, (int16_t)(jugador.y_fp >> FP_SHIFT));
@@ -1241,19 +1504,44 @@ static void Game_Update(void)
   uint8_t old_frame = jugador_frame;
   bool old_direccion = jugador_mira_derecha;
   bool cambio_pantalla = false;
+  bool colision_pared = false;
   int16_t movimiento_x = 0;
 
   shoot_anterior = shoot_pressed;
 
-  if (left_apachado && !right_apachado)
+  if (Game_BossActivo())
   {
-    movimiento_x = -PLAYER_SPEED;
-    jugador_mira_derecha = false;
+    jugador.vx = 0;
+
+    if ((!jump_pressed || !jugador.on_ground) &&
+        left_apachado && !right_apachado)
+    {
+      movimiento_x = -PLAYER_SPEED;
+      jugador_mira_derecha = false;
+    }
+    else if ((!jump_pressed || !jugador.on_ground) &&
+             right_apachado && !left_apachado)
+    {
+      movimiento_x = PLAYER_SPEED;
+      jugador_mira_derecha = true;
+    }
   }
-  else if (right_apachado && !left_apachado)
+  else if (jugador.on_ground)
   {
-    movimiento_x = PLAYER_SPEED;
-    jugador_mira_derecha = true;
+    jugador.vx = 0;
+
+    if (left_apachado && !right_apachado)
+    {
+      jugador_mira_derecha = false;
+    }
+    else if (right_apachado && !left_apachado)
+    {
+      jugador_mira_derecha = true;
+    }
+  }
+  else
+  {
+    movimiento_x = jugador.vx;
   }
 
   int16_t destino_x = old_x + movimiento_x;
@@ -1261,13 +1549,38 @@ static void Game_Update(void)
   if (destino_x < 0)
   {
     destino_x = 0;
+    colision_pared = true;
   }
   else if (destino_x > (LCD_ANCHO - JUGADOR_ANCHO))
   {
     destino_x = LCD_ANCHO - JUGADOR_ANCHO;
+    colision_pared = true;
   }
 
   jugador.x = Game_ResolverHorizontal(old_x, destino_x, old_y);
+  if (colision_pared)
+  {
+    if (!Game_BossActivo() && !jugador.on_ground)
+    {
+      int16_t fuerza = (jugador.vx < 0) ? -jugador.vx : jugador.vx;
+      int16_t rebote = (fuerza + 1) / 2;
+
+      if (destino_x == 0)
+      {
+        jugador.vx = rebote;
+        jugador_mira_derecha = true;
+      }
+      else
+      {
+        jugador.vx = -rebote;
+        jugador_mira_derecha = false;
+      }
+    }
+    else
+    {
+      jugador.vx = 0;
+    }
+  }
 
   bool caminando = jugador.x != old_x;
   uint32_t ahora = HAL_GetTick();
@@ -1286,40 +1599,72 @@ static void Game_Update(void)
     proximo_frame_caminata = ahora + WALK_FRAME_MS;
   }
 
-  if (Game_BossActivo())
-  {
-    jugador.y_fp = (int32_t)(PISO_Y - JUGADOR_ALTO) * FP_UNO;
-    jugador.vy_fp = 0L;
-    jugador.on_ground = true;
-    jump_apachado = jump_pressed;
-
-    if (Game_ActualizarBoss(disparar))
-    {
-      Game_DibujarFondo();
-      Game_DibujarJugador(jugador.x, PISO_Y - JUGADOR_ALTO);
-      return;
-    }
-
-    if ((jugador.x != old_x) ||
-        (jugador_frame != old_frame) ||
-        (jugador_mira_derecha != old_direccion))
-    {
-      Game_BorrarJugador(old_x, old_y);
-      Game_DibujarJugador(jugador.x, PISO_Y - JUGADOR_ALTO);
-    }
-    return;
-  }
-
   if (jugador.on_ground && !Game_TieneSoporte(jugador.x, old_y))
   {
     jugador.on_ground = false;
+    salto_cargando = false;
   }
 
-  //Iniciar salto cuando se apache
+  //Iniciar carga del salto
   if (jump_pressed && !jump_apachado && jugador.on_ground)
   {
-    jugador.vy_fp = JUMP_SPEED_FP;
-    jugador.on_ground = false;
+    salto_cargando = true;
+    salto_inicio = ahora;
+    salto_direccion = 0;
+
+    if (left_apachado && !right_apachado)
+    {
+      salto_direccion = -1;
+    }
+    else if (right_apachado && !left_apachado)
+    {
+      salto_direccion = 1;
+    }
+  }
+
+  if (salto_cargando)
+  {
+    uint32_t carga = ahora - salto_inicio;
+    bool soltar = !jump_pressed && jump_apachado;
+    bool carga_maxima = carga >= JUMP_CHARGE_MS;
+
+    if (left_apachado && !right_apachado)
+    {
+      salto_direccion = -1;
+      jugador_mira_derecha = false;
+    }
+    else if (right_apachado && !left_apachado)
+    {
+      salto_direccion = 1;
+      jugador_mira_derecha = true;
+    }
+
+    if (soltar || carga_maxima)
+    {
+      if (carga > JUMP_CHARGE_MS)
+      {
+        carga = JUMP_CHARGE_MS;
+      }
+
+      jugador.vy_fp = JUMP_MIN_SPEED_FP +
+                       (((JUMP_MAX_SPEED_FP - JUMP_MIN_SPEED_FP) *
+                         (int32_t)carga) / (int32_t)JUMP_CHARGE_MS);
+
+      if (Game_BossActivo())
+      {
+        jugador.vx = 0;
+      }
+      else
+      {
+        int16_t velocidad_x = JUMP_MIN_SPEED_X +
+                              (int16_t)(((JUMP_MAX_SPEED_X - JUMP_MIN_SPEED_X) *
+                                         carga) / JUMP_CHARGE_MS);
+        jugador.vx = (int16_t)(salto_direccion * velocidad_x);
+      }
+
+      jugador.on_ground = false;
+      salto_cargando = false;
+    }
   }
 
   jump_apachado = jump_pressed;
@@ -1358,6 +1703,46 @@ static void Game_Update(void)
     return;
   }
 
+  if (Game_BossActivo())
+  {
+    bool golpeado = false;
+
+    if (Game_ActualizarBoss(disparar, &golpeado))
+    {
+      Game_DibujarFondo();
+      Game_DibujarJugador(jugador.x, new_y);
+      return;
+    }
+
+    if (golpeado)
+    {
+      if (vida_jugador > 0U)
+      {
+        vida_jugador--;
+      }
+
+      if (vida_jugador == 0U)
+      {
+        estado_actual = ESTADO_JUEGO;
+        Game_Init();
+        return;
+      }
+
+      jugador.x = (LCD_ANCHO - JUGADOR_ANCHO) / 2;
+      jugador.vx = 0;
+      jugador.y_fp = (int32_t)(PISO_Y - JUGADOR_ALTO) * FP_UNO;
+      jugador.vy_fp = 0L;
+      jugador.on_ground = true;
+      salto_cargando = false;
+      disparo_activo = false;
+      Game_LimpiarDisparosBoss();
+      proximo_disparo_boss = HAL_GetTick() + 500U;
+      Game_DibujarFondo();
+      Game_DibujarJugador(jugador.x, PISO_Y - JUGADOR_ALTO);
+      return;
+    }
+  }
+
   if ((new_y + JUGADOR_ALTO) < 0)
   {
     if (pantalla_actual < (TOTAL_PANTALLAS - 1U))
@@ -1366,6 +1751,7 @@ static void Game_Update(void)
       if (Game_BossActivo())
       {
         Game_BossInit();
+        jugador.vx = 0;
         jugador.y_fp = (int32_t)(PISO_Y - JUGADOR_ALTO) * FP_UNO;
         jugador.vy_fp = 0L;
         jugador.on_ground = true;
@@ -1395,6 +1781,7 @@ static void Game_Update(void)
     }
     else
     {
+      jugador.vx = 0;
       jugador.y_fp = (int32_t)(PISO_Y - JUGADOR_ALTO) * FP_UNO;
       jugador.vy_fp = 0L;
       jugador.on_ground = true;
@@ -1419,7 +1806,10 @@ static void Game_Update(void)
     Game_DibujarJugador(jugador.x, new_y);
   }
 
-  Game_ActualizarDisparo(disparar);
+  if (!Game_BossActivo())
+  {
+    Game_ActualizarDisparo(disparar);
+  }
 }
 
 /* USER CODE END 0 */

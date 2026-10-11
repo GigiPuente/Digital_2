@@ -17,7 +17,6 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 
@@ -61,6 +60,19 @@ typedef enum
   ESTADO_JUEGO,
   ESTADO_DORMIDO
 } Estado_t;
+
+typedef struct
+{
+  uint16_t frecuencia;
+  uint16_t duracion;
+} Nota_t;
+
+typedef enum
+{
+  AUDIO_SILENCIO = 0,
+  AUDIO_MENU,
+  AUDIO_ATERRIZAJE
+} AudioEstado_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -126,6 +138,8 @@ typedef enum
 #define MENU_EMPEZAR               0U
 #define MENU_SALIR                 1U
 
+#define AUDIO_TIMER_HZ        1000000UL
+
 #define LCD_DATA_A_MASK           (LCD_D0_Pin | LCD_D2_Pin | LCD_D7_Pin)
 #define LCD_DATA_B_MASK           (LCD_D3_Pin | LCD_D4_Pin | LCD_D5_Pin | LCD_D6_Pin)
 #define LCD_DATA_C_MASK           (LCD_D1_Pin)
@@ -145,6 +159,10 @@ typedef enum
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+TIM_HandleTypeDef htim10;
+
+UART_HandleTypeDef huart2;
+
 /* USER CODE BEGIN PV */
 static Jugador_t jugador;
 static bool jump_apachado = false;
@@ -176,6 +194,28 @@ static DisparoBoss_t disparos_boss[BOSS_DISPAROS_MAX];
 static uint32_t proximo_disparo_boss = 0U;
 static uint8_t patron_disparo_boss = 0U;
 static uint8_t vida_jugador = 0U;
+static bool salto_en_curso = false;
+static AudioEstado_t audio_estado = AUDIO_SILENCIO;
+static uint8_t audio_indice = 0U;
+static uint32_t audio_siguiente = 0U;
+static const Nota_t musica_menu[] = {
+  {523U, 140U}, {659U, 140U}, {784U, 180U}, {1047U, 260U},
+  {0U, 70U}, {988U, 140U}, {784U, 140U}, {659U, 220U},
+  {0U, 90U}, {587U, 140U}, {659U, 140U}, {784U, 240U},
+  {0U, 130U}, {659U, 140U}, {784U, 140U}, {880U, 180U},
+  {1175U, 260U}, {0U, 70U}, {1047U, 140U}, {880U, 140U},
+  {784U, 220U}, {0U, 90U}, {659U, 140U}, {784U, 140U},
+  {988U, 240U}, {0U, 130U}, {784U, 160U}, {659U, 160U},
+  {587U, 180U}, {523U, 220U}, {0U, 70U}, {587U, 140U},
+  {659U, 140U}, {784U, 220U}, {0U, 90U}, {880U, 140U},
+  {784U, 140U}, {659U, 240U}, {0U, 130U}, {523U, 140U},
+  {659U, 140U}, {784U, 180U}, {988U, 220U}, {1047U, 300U},
+  {0U, 100U}, {784U, 160U}, {659U, 160U}, {587U, 200U},
+  {523U, 420U}, {0U, 650U}
+};
+static const Nota_t efecto_aterrizaje[] = {
+  {262U, 35U}, {196U, 65U}
+};
 static const uint16_t colores_pantalla[TOTAL_PANTALLAS] = {
   0x10A6U, 0x2149U, 0x3128U, 0x1803U,
   0x0328U, 0x03CBU, 0x046DU, 0x0183U,
@@ -336,7 +376,15 @@ static const uint8_t fuente_5x7[26][5] = {
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_TIM10_Init(void);
 /* USER CODE BEGIN PFP */
+static void Audio_Tono(uint16_t frecuencia);
+static void Audio_Detener(void);
+static void Audio_Init(void);
+static void Audio_MenuIniciar(void);
+static void Audio_EfectoAterrizaje(void);
+static void Audio_Update(void);
 static inline void LCD_Write8(uint8_t value);
 static void LCD_HardwareReset(void);
 static void LCD_WriteCommand(uint8_t command);
@@ -396,6 +444,102 @@ static void Game_Update(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+static void Audio_Tono(uint16_t frecuencia)
+{
+  uint32_t periodo;
+
+  if (frecuencia == 0U)
+  {
+    __HAL_TIM_SET_COMPARE(&htim10, TIM_CHANNEL_1, 0U);
+    return;
+  }
+
+  periodo = AUDIO_TIMER_HZ / frecuencia;
+  if (periodo < 2U)
+  {
+    periodo = 2U;
+  }
+
+  __HAL_TIM_SET_AUTORELOAD(&htim10, periodo - 1U);
+  __HAL_TIM_SET_COMPARE(&htim10, TIM_CHANNEL_1, periodo / 2U);
+  __HAL_TIM_SET_COUNTER(&htim10, 0U);
+  htim10.Instance->EGR = TIM_EGR_UG;
+}
+
+static void Audio_Detener(void)
+{
+  audio_estado = AUDIO_SILENCIO;
+  audio_indice = 0U;
+  audio_siguiente = 0U;
+  Audio_Tono(0U);
+}
+
+static void Audio_Init(void)
+{
+  if (HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  Audio_Detener();
+}
+
+static void Audio_MenuIniciar(void)
+{
+  audio_estado = AUDIO_MENU;
+  audio_indice = 0U;
+  Audio_Tono(musica_menu[0].frecuencia);
+  audio_siguiente = HAL_GetTick() + musica_menu[0].duracion;
+}
+
+static void Audio_EfectoAterrizaje(void)
+{
+  audio_estado = AUDIO_ATERRIZAJE;
+  audio_indice = 0U;
+  Audio_Tono(efecto_aterrizaje[0].frecuencia);
+  audio_siguiente = HAL_GetTick() + efecto_aterrizaje[0].duracion;
+}
+
+static void Audio_Update(void)
+{
+  const Nota_t *nota;
+  uint32_t ahora;
+
+  if (audio_estado == AUDIO_SILENCIO)
+  {
+    return;
+  }
+
+  ahora = HAL_GetTick();
+  if ((int32_t)(ahora - audio_siguiente) < 0)
+  {
+    return;
+  }
+
+  audio_indice++;
+
+  if (audio_estado == AUDIO_MENU)
+  {
+    if (audio_indice >= (sizeof(musica_menu) / sizeof(musica_menu[0])))
+    {
+      audio_indice = 0U;
+    }
+    nota = &musica_menu[audio_indice];
+  }
+  else
+  {
+    if (audio_indice >= (sizeof(efecto_aterrizaje) / sizeof(efecto_aterrizaje[0])))
+    {
+      Audio_Detener();
+      return;
+    }
+    nota = &efecto_aterrizaje[audio_indice];
+  }
+
+  Audio_Tono(nota->frecuencia);
+  audio_siguiente = ahora + nota->duracion;
+}
 
 //Bus entre tres puertos
 static inline void LCD_Write8(uint8_t value)
@@ -717,6 +861,7 @@ static void Menu_Init(void)
   despertar_armado = false;
   Menu_Dibujar();
   Botones_Sincronizar();
+  Audio_MenuIniciar();
 }
 
 static void Menu_Update(void)
@@ -742,12 +887,14 @@ static void Menu_Update(void)
   {
     if (opcion_menu == MENU_EMPEZAR)
     {
+      Audio_Detener();
       estado_actual = ESTADO_JUEGO;
       Game_Init();
       jump_apachado = jump_actual;
     }
     else
     {
+      Audio_Detener();
       LCD_Apagar();
       estado_actual = ESTADO_DORMIDO;
       despertar_armado = false;
@@ -1463,6 +1610,7 @@ static void Game_BorrarJugador(int16_t x, int16_t y)
 
 static void Game_Init(void)
 {
+  Audio_Detener();
   pantalla_actual = 0U;
   jugador.x = (LCD_ANCHO - JUGADOR_ANCHO) / 2;
   jugador.vx = 0;
@@ -1487,6 +1635,7 @@ static void Game_Init(void)
   proximo_disparo_boss = 0U;
   patron_disparo_boss = 0U;
   vida_jugador = 0U;
+  salto_en_curso = false;
 
   Game_DibujarFondo();
   Game_DibujarJugador(jugador.x, (int16_t)(jugador.y_fp >> FP_SHIFT));
@@ -1505,6 +1654,7 @@ static void Game_Update(void)
   bool old_direccion = jugador_mira_derecha;
   bool cambio_pantalla = false;
   bool colision_pared = false;
+  bool estaba_en_suelo = jugador.on_ground;
   int16_t movimiento_x = 0;
 
   shoot_anterior = shoot_pressed;
@@ -1664,6 +1814,7 @@ static void Game_Update(void)
 
       jugador.on_ground = false;
       salto_cargando = false;
+      salto_en_curso = true;
     }
   }
 
@@ -1690,6 +1841,12 @@ static void Game_Update(void)
     {
       jugador.y_fp = (int32_t)posicion_y * FP_UNO;
     }
+  }
+
+  if (!estaba_en_suelo && jugador.on_ground && salto_en_curso)
+  {
+    Audio_EfectoAterrizaje();
+    salto_en_curso = false;
   }
 
   int16_t new_y = (int16_t)(jugador.y_fp >> FP_SHIFT);
@@ -1734,6 +1891,7 @@ static void Game_Update(void)
       jugador.vy_fp = 0L;
       jugador.on_ground = true;
       salto_cargando = false;
+      salto_en_curso = false;
       disparo_activo = false;
       Game_LimpiarDisparosBoss();
       proximo_disparo_boss = HAL_GetTick() + 500U;
@@ -1755,6 +1913,7 @@ static void Game_Update(void)
         jugador.y_fp = (int32_t)(PISO_Y - JUGADOR_ALTO) * FP_UNO;
         jugador.vy_fp = 0L;
         jugador.on_ground = true;
+        salto_en_curso = false;
       }
       else
       {
@@ -1785,6 +1944,7 @@ static void Game_Update(void)
       jugador.y_fp = (int32_t)(PISO_Y - JUGADOR_ALTO) * FP_UNO;
       jugador.vy_fp = 0L;
       jugador.on_ground = true;
+      salto_en_curso = false;
     }
   }
 
@@ -1820,17 +1980,34 @@ static void Game_Update(void)
   */
 int main(void)
 {
+
   /* USER CODE BEGIN 1 */
   uint32_t next_frame;
   /* USER CODE END 1 */
 
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-
+  MX_USART2_UART_Init();
+  MX_TIM10_Init();
   /* USER CODE BEGIN 2 */
+  Audio_Init();
+
   //Deseleccionar los dispositivos SPI
   HAL_GPIO_WritePin(F_CS_GPIO_Port, F_CS_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
@@ -1848,6 +2025,8 @@ int main(void)
   while (1)
   {
     uint32_t now = HAL_GetTick();
+
+    Audio_Update();
 
     if ((int32_t)(now - next_frame) >= 0)
     {
@@ -1874,9 +2053,9 @@ int main(void)
     }
 
     HAL_Delay(1U);
-  /* USER CODE END WHILE */
+    /* USER CODE END WHILE */
 
-  /* USER CODE BEGIN 3 */
+    /* USER CODE BEGIN 3 */
   }
   /* USER CODE END 3 */
 }
@@ -1890,9 +2069,14 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
@@ -1903,20 +2087,22 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
-
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
+  /** Activate the Over-Drive mode
+  */
   if (HAL_PWREx_EnableOverDrive() != HAL_OK)
   {
     Error_Handler();
   }
 
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-                              | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
-
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
@@ -1929,6 +2115,85 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief TIM10 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM10_Init(void)
+{
+
+  /* USER CODE BEGIN TIM10_Init 0 */
+
+  /* USER CODE END TIM10_Init 0 */
+
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM10_Init 1 */
+
+  /* USER CODE END TIM10_Init 1 */
+  htim10.Instance = TIM10;
+  htim10.Init.Prescaler = 179;
+  htim10.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim10.Init.Period = 999;
+  htim10.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim10.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim10, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM10_Init 2 */
+
+  /* USER CODE END TIM10_Init 2 */
+  HAL_TIM_MspPostInit(&htim10);
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -1936,63 +2201,84 @@ void SystemClock_Config(void)
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
 
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  HAL_GPIO_WritePin(GPIOC, F_CS_Pin | LCD_RST_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOA, LCD_RD_Pin | LCD_WR_Pin, GPIO_PIN_SET);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, F_CS_Pin|LCD_RST_Pin, GPIO_PIN_SET);
 
-  HAL_GPIO_WritePin(GPIOA, LCD_RS_Pin | LD2_Pin | LCD_D7_Pin | LCD_D0_Pin
-                         | LCD_D2_Pin, GPIO_PIN_RESET);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, LCD_RD_Pin|LCD_WR_Pin, GPIO_PIN_SET);
 
-  HAL_GPIO_WritePin(GPIOB, LCD_CS_Pin | SD_CS_Pin, GPIO_PIN_SET);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, LCD_RS_Pin|LD2_Pin|LCD_D7_Pin|LCD_D0_Pin
+                          |LCD_D2_Pin, GPIO_PIN_RESET);
 
-  HAL_GPIO_WritePin(GPIOB, LCD_D6_Pin | LCD_D3_Pin | LCD_D5_Pin | LCD_D4_Pin,
-                    GPIO_PIN_RESET);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, LCD_CS_Pin|SD_CS_Pin, GPIO_PIN_SET);
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, LCD_D6_Pin|LCD_D3_Pin|LCD_D5_Pin|LCD_D4_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(LCD_D1_GPIO_Port, LCD_D1_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = F_CS_Pin | LCD_RST_Pin | LCD_D1_Pin;
+  /*Configure GPIO pins : F_CS_Pin LCD_RST_Pin LCD_D1_Pin */
+  GPIO_InitStruct.Pin = F_CS_Pin|LCD_RST_Pin|LCD_D1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = LCD_RD_Pin | LCD_WR_Pin | LCD_RS_Pin | LCD_D7_Pin
-                        | LCD_D0_Pin | LCD_D2_Pin;
-
+  /*Configure GPIO pins : LCD_RD_Pin LCD_WR_Pin LCD_RS_Pin LCD_D7_Pin
+                           LCD_D0_Pin LCD_D2_Pin */
+  GPIO_InitStruct.Pin = LCD_RD_Pin|LCD_WR_Pin|LCD_RS_Pin|LCD_D7_Pin
+                          |LCD_D0_Pin|LCD_D2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
+  /*Configure GPIO pin : LD2_Pin */
   GPIO_InitStruct.Pin = LD2_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = LCD_CS_Pin | LCD_D6_Pin | LCD_D3_Pin | LCD_D5_Pin
-                        | LCD_D4_Pin | SD_CS_Pin;
-
+  /*Configure GPIO pins : LCD_CS_Pin LCD_D6_Pin LCD_D3_Pin LCD_D5_Pin
+                           LCD_D4_Pin SD_CS_Pin */
+  GPIO_InitStruct.Pin = LCD_CS_Pin|LCD_D6_Pin|LCD_D3_Pin|LCD_D5_Pin
+                          |LCD_D4_Pin|SD_CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = BTN_LEFT_Pin | BTN_RIGHT_Pin | BTN_JUMP_Pin
-                        | BTN_SHOOT_Pin;
+  /*Configure GPIO pins : BTN_PAUSE_Pin BTN_SHOOT_Pin BTN_LEFT_Pin BTN_RIGHT_Pin
+                           BTN_JUMP_Pin */
+  GPIO_InitStruct.Pin = BTN_PAUSE_Pin|BTN_SHOOT_Pin|BTN_LEFT_Pin|BTN_RIGHT_Pin
+                          |BTN_JUMP_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
@@ -2004,17 +2290,27 @@ static void MX_GPIO_Init(void)
   */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
-
   while (1)
   {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
-
 #ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  (void)file;
-  (void)line;
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

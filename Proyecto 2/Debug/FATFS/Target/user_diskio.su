@@ -1,0 +1,17 @@
+../FATFS/Target/user_diskio.c:74:13:SD_CS_Alto	8	static
+../FATFS/Target/user_diskio.c:79:13:SD_CS_Bajo	8	static
+../FATFS/Target/user_diskio.c:84:16:SD_SPI_Byte	32	static
+../FATFS/Target/user_diskio.c:91:13:SD_SPI_Recibir	64	static
+../FATFS/Target/user_diskio.c:114:13:SD_SPI_Enviar	16	static
+../FATFS/Target/user_diskio.c:120:13:SD_SPI_Velocidad	16	static
+../FATFS/Target/user_diskio.c:128:13:SD_EsperarListo	24	static
+../FATFS/Target/user_diskio.c:143:13:SD_Deseleccionar	8	static
+../FATFS/Target/user_diskio.c:149:13:SD_Seleccionar	8	static
+../FATFS/Target/user_diskio.c:163:16:SD_EnviarComando	24	static
+../FATFS/Target/user_diskio.c:225:13:SD_RecibirBloque	24	static
+../FATFS/Target/user_diskio.c:251:13:SD_EnviarBloque	24	static
+../FATFS/Target/user_diskio.c:316:9:USER_initialize	48	static
+../FATFS/Target/user_diskio.c:425:9:USER_status	16	static
+../FATFS/Target/user_diskio.c:447:9:USER_read	24	static
+../FATFS/Target/user_diskio.c:506:9:USER_write	32	static
+../FATFS/Target/user_diskio.c:581:9:USER_ioctl	48	static

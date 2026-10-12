@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "fatfs.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -57,7 +58,9 @@ typedef struct
 typedef enum
 {
   ESTADO_MENU = 0,
+  ESTADO_LOAD,
   ESTADO_JUEGO,
+  ESTADO_PAUSA,
   ESTADO_DORMIDO
 } Estado_t;
 
@@ -71,6 +74,7 @@ typedef enum
 {
   AUDIO_SILENCIO = 0,
   AUDIO_MENU,
+  AUDIO_PAUSA,
   AUDIO_ATERRIZAJE
 } AudioEstado_t;
 /* USER CODE END PTD */
@@ -79,6 +83,8 @@ typedef enum
 /* USER CODE BEGIN PD */
 #define LCD_ANCHO               320
 #define LCD_ALTO                240
+#define TOTAL_FONDOS             12U
+#define FONDO_TAMANO_BYTES   153600UL
 
 #define COLOR_NEGRO             0x0000U
 #define COLOR_BLANCO            0xFFFFU
@@ -94,6 +100,7 @@ typedef enum
 #define COLOR_BOSS_OSCURO       0x780FU
 #define COLOR_BOSS_CLARO        0xF81FU
 #define COLOR_BOSS_OJOS         0xFFE0U
+#define COLOR_TRANSPARENTE      0x0000U
 
 #define JUGADOR_ANCHO            16
 #define JUGADOR_ALTO             20
@@ -101,7 +108,7 @@ typedef enum
 #define PLAYER_SPEED             3
 #define WALK_FRAME_MS            120U
 #define PISO_Y                   210
-#define TOTAL_PANTALLAS           12U
+#define TOTAL_PANTALLAS           16U
 #define PLATAFORMAS_PANTALLA       5U
 #define BOSS_ANCHO                32
 #define BOSS_ALTO                 36
@@ -119,11 +126,6 @@ typedef enum
 #define PISTOLA_Y                 198
 #define PISTOLA_ANCHO              18
 #define PISTOLA_ALTO                9
-#define FONDO1_ANCHO                20
-#define FONDO1_ALTO                 16
-#define FONDO1_ESCALA_X             16
-#define FONDO1_ESCALA_Y             15
-
 #define FP_SHIFT                  8
 #define FP_UNO                    (1L << FP_SHIFT)
 #define GRAVEDAD_FP               50L
@@ -135,8 +137,21 @@ typedef enum
 #define MAX_FALL_SPEED_FP         2048L
 #define FRAME_TIME_MS             16U
 
+#define CONTROL_VALIDO            0x80U
+#define CONTROL_IZQUIERDA         0x01U
+#define CONTROL_DERECHA           0x02U
+#define CONTROL_SALTO             0x04U
+#define CONTROL_DISPARO           0x08U
+#define CONTROL_PAUSA             0x10U
+#define CONTROL_TIMEOUT_MS         250U
+
 #define MENU_EMPEZAR               0U
-#define MENU_SALIR                 1U
+#define MENU_LOAD                  1U
+#define MENU_SALIR                 2U
+#define MENU_TOTAL                 3U
+#define TOTAL_BOSSES               4U
+#define PAUSA_CONTINUAR             0U
+#define PAUSA_SALIR                 1U
 
 #define AUDIO_TIMER_HZ        1000000UL
 
@@ -159,8 +174,11 @@ typedef enum
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+SPI_HandleTypeDef hspi1;
+
 TIM_HandleTypeDef htim10;
 
+UART_HandleTypeDef huart4;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
@@ -171,16 +189,20 @@ static uint32_t salto_inicio = 0U;
 static int8_t salto_direccion = 0;
 static Estado_t estado_actual = ESTADO_MENU;
 static uint8_t opcion_menu = MENU_EMPEZAR;
+static uint8_t opcion_load = 0U;
 static bool left_anterior = false;
 static bool right_anterior = false;
 static bool jump_anterior = false;
 static bool shoot_anterior = false;
+static bool pause_anterior = false;
 static bool despertar_armado = false;
+static uint8_t opcion_pausa = PAUSA_CONTINUAR;
+static uint32_t pausa_inicio = 0U;
 static uint8_t jugador_frame = 0U;
 static bool jugador_mira_derecha = true;
 static uint32_t proximo_frame_caminata = 0U;
 static uint8_t pantalla_actual = 0U;
-static bool bosses_derrotados[3] = {false, false, false};
+static bool bosses_derrotados[4] = {false, false, false, false};
 static int16_t boss_x = 0;
 static int8_t boss_direccion = 1;
 static uint8_t boss_vida = 0U;
@@ -195,6 +217,15 @@ static uint32_t proximo_disparo_boss = 0U;
 static uint8_t patron_disparo_boss = 0U;
 static uint8_t vida_jugador = 0U;
 static bool salto_en_curso = false;
+static uint8_t control_rx_byte = 0U;
+static volatile uint8_t control_estado = 0U;
+static volatile uint32_t control_ultimo_ms = 0U;
+static FATFS sd_fatfs;
+static FIL fondo_archivo;
+static bool sd_lista = false;
+static bool fondo_abierto = false;
+static uint8_t fondo_indice_abierto = 0xFFU;
+static uint16_t fondo_buffer[LCD_ANCHO];
 static AudioEstado_t audio_estado = AUDIO_SILENCIO;
 static uint8_t audio_indice = 0U;
 static uint32_t audio_siguiente = 0U;
@@ -213,50 +244,99 @@ static const Nota_t musica_menu[] = {
   {0U, 100U}, {784U, 160U}, {659U, 160U}, {587U, 200U},
   {523U, 420U}, {0U, 650U}
 };
+static const Nota_t musica_pausa[] = {
+  {220U, 260U}, {262U, 260U}, {330U, 420U}, {0U, 120U},
+  {294U, 260U}, {262U, 260U}, {220U, 420U}, {0U, 160U},
+  {196U, 260U}, {220U, 260U}, {262U, 420U}, {0U, 120U},
+  {247U, 260U}, {220U, 260U}, {196U, 500U}, {0U, 300U},
+  {220U, 300U}, {330U, 300U}, {294U, 300U}, {262U, 500U},
+  {0U, 200U}, {196U, 300U}, {247U, 300U}, {220U, 600U},
+  {0U, 500U}
+};
 static const Nota_t efecto_aterrizaje[] = {
   {262U, 35U}, {196U, 65U}
 };
+static const char *const nombres_boss[4] = {
+  "CHANCLA", "BRAVA", "ALEMANIA", "GRASA"
+};
+static const uint16_t colores_boss_claro[4] = {
+  0x8010U, 0xF800U, 0xFB56U, 0xFFE0U
+};
+static const uint16_t colores_boss_oscuro[4] = {
+  0x4008U, 0x7800U, 0xA18FU, 0xA500U
+};
+static const uint16_t sprite_idle_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0xf800, 0xf800, 0xf800, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xf800, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0xf800, 0xf800, 0xf800, 0xf800, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xf800, 0xf800, 0x0000, 0x0000,
+  0xf800, 0xf800, 0xf800, 0x0000, 0xfe38, 0xf800, 0xf800, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0xf800, 0xf800, 0xf800, 0xf800,
+  0x0000, 0x0000, 0xf800, 0xf800, 0xf800, 0xf800, 0xf800, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xf800, 0xf800, 0xf800, 0xf800, 0xf800,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0xfe38, 0xfe38, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x0000, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000
+};
+static const uint16_t sprite_carga_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xf800, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xf800, 0xf800, 0xf800, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xf800, 0xf800, 0xf800, 0xf800, 0xf800, 0xf800, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0xf800, 0xf800, 0xf800, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0xf800, 0xf800, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0xf800, 0xf800, 0xf800, 0x0000, 0xfe38, 0x6800, 0x6800, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0xf800, 0xf800, 0xf800, 0xfe38, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+};
+static const uint16_t sprite_aire_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0xf800, 0x0000, 0x0000, 0xf800,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xf800, 0xf800, 0xf800, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xf800, 0x0000, 0xf800, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0xf800, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xf800, 0xf800, 0xf800, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xf800, 0xf800, 0xf800, 0xf800, 0xf800, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0x6800, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x6800, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+  0x0000, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
+};
 static const uint16_t colores_pantalla[TOTAL_PANTALLAS] = {
   0x10A6U, 0x2149U, 0x3128U, 0x1803U,
-  0x0328U, 0x03CBU, 0x046DU, 0x0183U,
-  0x4008U, 0x600CU, 0x8010U, 0x2004U
+  0x1003U, 0x0328U, 0x03CBU, 0x046DU,
+  0x0183U, 0x3006U, 0x4008U, 0x600CU,
+  0x8010U, 0x2004U, 0x0801U, 0x1800U
 };
-static const uint16_t fondo_pantalla_1[] = {
-  0x18c1, 0x1901, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
-  0x2981, 0x1901, 0x1901, 0x1901, 0x1080, 0x1080, 0x1080, 0x1080, 0x1080, 0x1080,
-  0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
-  0x2981, 0x2981, 0x2981, 0x2981, 0x31c2, 0x3a42, 0x3a42, 0x3a42, 0x3a42, 0x31c2,
-  0x18c1, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840,
-  0x1080, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x1080, 0x1080, 0x1080, 0x1080,
-  0x1080, 0x1080, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
-  0x1901, 0x1901, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
-  0x18c1, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901, 0x1901,
-  0x1901, 0x1901, 0x2141, 0x2141, 0x2141, 0x2981, 0x2981, 0x2981, 0x2141, 0x2141,
-  0x1901, 0x1901, 0x1901, 0x18c1, 0x18c1, 0x18c1, 0x1901, 0x2141, 0x1901, 0x1901,
-  0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x1080, 0x1080, 0x1080, 0x1080, 0x1080,
-  0x2981, 0x1901, 0x2981, 0x2981, 0x2981, 0x1901, 0x18c1, 0x1080, 0x1080, 0x1080,
-  0x1080, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
-  0x18c1, 0x1901, 0x2141, 0x2141, 0x2141, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
-  0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x18c1, 0x18c1, 0x18c1,
-  0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x1080, 0x0840, 0x0840, 0x0840,
-  0x0840, 0x18c1, 0x1901, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
-  0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
-  0x2981, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x2981, 0x2981, 0x2981,
-  0x2981, 0x31c2, 0x31c2, 0x31c2, 0x31c2, 0x3a42, 0x3a42, 0x3a42, 0x31c2, 0x31c2,
-  0x2981, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
-  0x18c1, 0x18c1, 0x4a83, 0x2981, 0x2981, 0x18c1, 0x2981, 0x2981, 0x2981, 0x2981,
-  0x4a83, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303, 0x5303,
-  0x2981, 0x1080, 0x1080, 0x1080, 0x1080, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840,
-  0x1080, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840, 0x0840,
-  0x18c1, 0x31c2, 0x3a42, 0x3a42, 0x3a42, 0x3a42, 0x31c2, 0x2981, 0x2981, 0x2981,
-  0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981, 0x2981,
-  0x2981, 0x2981, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1,
-  0x18c1, 0x1901, 0x18c1, 0x18c1, 0x18c1, 0x1901, 0x1901, 0x2981, 0x2981, 0x1901,
-  0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x18c1, 0x1901, 0x2141, 0x2981, 0x2981, 0x18c1,
-  0x1080, 0x0840, 0x0840, 0x0840, 0x0840, 0x1080, 0x18c1, 0x18c1, 0x18c1, 0x18c1
-};
-_Static_assert((sizeof(fondo_pantalla_1) / sizeof(fondo_pantalla_1[0])) ==
-               (FONDO1_ANCHO * FONDO1_ALTO), "Fondo invalido");
 static const Plataforma_t plataformas[TOTAL_PANTALLAS][PLATAFORMAS_PANTALLA] = {
   {
     {25, 170, 90, 8},
@@ -341,6 +421,34 @@ static const Plataforma_t plataformas[TOTAL_PANTALLAS][PLATAFORMAS_PANTALLA] = {
     {30, 125, 85, 8},
     {195, 80, 105, 8},
     {95, 30, 100, 8}
+  },
+  {
+    {215, 205, 95, 8},
+    {120, 165, 80, 8},
+    {25, 120, 90, 8},
+    {155, 75, 95, 8},
+    {40, 30, 100, 8}
+  },
+  {
+    {20, 205, 105, 8},
+    {180, 165, 90, 8},
+    {70, 120, 85, 8},
+    {215, 75, 85, 8},
+    {110, 30, 95, 8}
+  },
+  {
+    {210, 205, 100, 8},
+    {45, 165, 90, 8},
+    {175, 120, 90, 8},
+    {65, 75, 85, 8},
+    {200, 30, 100, 8}
+  },
+  {
+    {20, 205, 110, 8},
+    {155, 165, 90, 8},
+    {35, 120, 85, 8},
+    {195, 75, 100, 8},
+    {90, 30, 100, 8}
   }
 };
 static const uint8_t fuente_5x7[26][5] = {
@@ -378,11 +486,14 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_TIM10_Init(void);
+static void MX_UART4_Init(void);
+static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 static void Audio_Tono(uint16_t frecuencia);
 static void Audio_Detener(void);
 static void Audio_Init(void);
 static void Audio_MenuIniciar(void);
+static void Audio_PausaIniciar(void);
 static void Audio_EfectoAterrizaje(void);
 static void Audio_Update(void);
 static inline void LCD_Write8(uint8_t value);
@@ -401,11 +512,20 @@ static uint16_t LCD_AnchoTexto(const char *texto, uint8_t escala);
 static void LCD_Apagar(void);
 static void LCD_Encender(void);
 
-static bool Boton_Apachado(GPIO_TypeDef *port, uint16_t pin);
+static void Control_Iniciar(void);
+static uint8_t Control_Leer(void);
+static bool Control_Presionado(uint8_t estado, uint8_t boton);
 static void Botones_Sincronizar(void);
 static void Menu_Dibujar(void);
 static void Menu_Init(void);
 static void Menu_Update(void);
+static void Load_Dibujar(void);
+static void Load_Init(void);
+static void Load_Update(void);
+static void Pausa_Dibujar(void);
+static void Pausa_Init(void);
+static void Pausa_Continuar(void);
+static void Pausa_Update(void);
 static void Dormido_Update(void);
 static bool Game_TraslapeHorizontal(int16_t x, const Plataforma_t *plataforma);
 static bool Game_TieneSoporte(int16_t x, int16_t y);
@@ -433,12 +553,22 @@ static void Game_DibujarVidaJugador(void);
 static void Game_DibujarDisparo(void);
 static void Game_DibujarPistola(void);
 static void Game_BorrarDisparo(int16_t x, int16_t y);
-static void Game_DibujarFondoPantalla1(void);
+static bool SD_Init(void);
+static void SD_CerrarFondo(void);
+static bool SD_AbrirFondo(uint8_t indice);
+static bool SD_DibujarRegion(uint8_t indice, int16_t x, int16_t y,
+                            int16_t ancho, int16_t alto);
+static uint8_t Game_IndiceFondo(void);
 static void Game_RestaurarFondo(int16_t x, int16_t y, int16_t ancho, int16_t alto);
 static void Game_DibujarFondo(void);
+static const uint16_t *Game_SpriteJugador(void);
+static void LCD_DibujarSpriteJugador(int16_t x, int16_t y,
+                                     const uint16_t *sprite, bool derecha);
 static void Game_DibujarJugador(int16_t x, int16_t y);
 static void Game_BorrarJugador(int16_t x, int16_t y);
+static void Game_Iniciar(uint8_t pantalla_inicial, bool pistola_inicial);
 static void Game_Init(void);
+static void Game_InitBoss(uint8_t indice);
 static void Game_Update(void);
 /* USER CODE END PFP */
 
@@ -493,6 +623,14 @@ static void Audio_MenuIniciar(void)
   audio_siguiente = HAL_GetTick() + musica_menu[0].duracion;
 }
 
+static void Audio_PausaIniciar(void)
+{
+  audio_estado = AUDIO_PAUSA;
+  audio_indice = 0U;
+  Audio_Tono(musica_pausa[0].frecuencia);
+  audio_siguiente = HAL_GetTick() + musica_pausa[0].duracion;
+}
+
 static void Audio_EfectoAterrizaje(void)
 {
   audio_estado = AUDIO_ATERRIZAJE;
@@ -526,6 +664,14 @@ static void Audio_Update(void)
       audio_indice = 0U;
     }
     nota = &musica_menu[audio_indice];
+  }
+  else if (audio_estado == AUDIO_PAUSA)
+  {
+    if (audio_indice >= (sizeof(musica_pausa) / sizeof(musica_pausa[0])))
+    {
+      audio_indice = 0U;
+    }
+    nota = &musica_pausa[audio_indice];
   }
   else
   {
@@ -756,6 +902,13 @@ static void LCD_DibujarCaracter(int16_t x, int16_t y, char caracter, uint8_t esc
     forma = fuente_5x7[(uint8_t)(caracter - 'A')];
   }
 
+  if (caracter == '-')
+  {
+    LCD_Llenar_Rect(x, (int16_t)(y + (int16_t)(3U * escala)),
+                    (int16_t)(5U * escala), escala, color);
+    return;
+  }
+
   if (forma == NULL)
   {
     return;
@@ -815,47 +968,76 @@ static void LCD_Encender(void)
   HAL_Delay(20U);
 }
 
-static bool Boton_Apachado(GPIO_TypeDef *port, uint16_t pin)
+static void Control_Iniciar(void)
 {
-  return HAL_GPIO_ReadPin(port, pin) == GPIO_PIN_RESET;
+  control_estado = 0U;
+  control_ultimo_ms = HAL_GetTick();
+  HAL_UART_Receive_IT(&huart4, &control_rx_byte, 1U);
+}
+
+static uint8_t Control_Leer(void)
+{
+  if ((HAL_GetTick() - control_ultimo_ms) > CONTROL_TIMEOUT_MS)
+  {
+    return 0U;
+  }
+
+  return control_estado;
+}
+
+static bool Control_Presionado(uint8_t estado, uint8_t boton)
+{
+  return (estado & boton) != 0U;
 }
 
 static void Botones_Sincronizar(void)
 {
-  left_anterior = Boton_Apachado(BTN_LEFT_GPIO_Port, BTN_LEFT_Pin);
-  right_anterior = Boton_Apachado(BTN_RIGHT_GPIO_Port, BTN_RIGHT_Pin);
-  jump_anterior = Boton_Apachado(BTN_JUMP_GPIO_Port, BTN_JUMP_Pin);
-  shoot_anterior = Boton_Apachado(BTN_SHOOT_GPIO_Port, BTN_SHOOT_Pin);
+  uint8_t control = Control_Leer();
+
+  left_anterior = Control_Presionado(control, CONTROL_IZQUIERDA);
+  right_anterior = Control_Presionado(control, CONTROL_DERECHA);
+  jump_anterior = Control_Presionado(control, CONTROL_SALTO);
+  shoot_anterior = Control_Presionado(control, CONTROL_DISPARO);
+  pause_anterior = Control_Presionado(control, CONTROL_PAUSA);
 }
 
 static void Menu_Dibujar(void)
 {
-  const char titulo[] = "JUMP KING";
+  const char titulo[] = "EX-Machina";
   const char empezar[] = "EMPEZAR";
+  const char load[] = "LOAD";
   const char salir[] = "SALIR";
   uint16_t color_empezar = (opcion_menu == MENU_EMPEZAR) ? COLOR_SELECCION : COLOR_OPCION;
+  uint16_t color_load = (opcion_menu == MENU_LOAD) ? COLOR_SELECCION : COLOR_OPCION;
   uint16_t color_salir = (opcion_menu == MENU_SALIR) ? COLOR_SELECCION : COLOR_OPCION;
   int16_t titulo_x = (int16_t)((LCD_ANCHO - LCD_AnchoTexto(titulo, 4U)) / 2U);
   int16_t empezar_x = (int16_t)((LCD_ANCHO - LCD_AnchoTexto(empezar, 3U)) / 2U);
+  int16_t load_x = (int16_t)((LCD_ANCHO - LCD_AnchoTexto(load, 3U)) / 2U);
   int16_t salir_x = (int16_t)((LCD_ANCHO - LCD_AnchoTexto(salir, 3U)) / 2U);
 
   LCD_Llenar_Pantalla(COLOR_MENU);
-  LCD_DibujarTexto(titulo_x, 18, titulo, 4U, COLOR_TITULO, COLOR_MENU);
-  LCD_Llenar_Rect(45, 58, 230, 3, COLOR_TITULO);
+  LCD_DibujarTexto(titulo_x, 10, titulo, 4U, COLOR_TITULO, COLOR_MENU);
+  LCD_Llenar_Rect(45, 48, 230, 3, COLOR_TITULO);
 
-  LCD_Llenar_Rect(65, 92, 190, 39, color_empezar);
-  LCD_DibujarTexto(empezar_x, 101, empezar, 3U,
+  LCD_Llenar_Rect(65, 67, 190, 36, color_empezar);
+  LCD_DibujarTexto(empezar_x, 75, empezar, 3U,
                    (opcion_menu == MENU_EMPEZAR) ? COLOR_NEGRO : COLOR_BLANCO,
                    color_empezar);
 
-  LCD_Llenar_Rect(65, 148, 190, 39, color_salir);
-  LCD_DibujarTexto(salir_x, 157, salir, 3U,
+  LCD_Llenar_Rect(65, 117, 190, 36, color_load);
+  LCD_DibujarTexto(load_x, 125, load, 3U,
+                   (opcion_menu == MENU_LOAD) ? COLOR_NEGRO : COLOR_BLANCO,
+                   color_load);
+
+  LCD_Llenar_Rect(65, 167, 190, 36, color_salir);
+  LCD_DibujarTexto(salir_x, 175, salir, 3U,
                    (opcion_menu == MENU_SALIR) ? COLOR_NEGRO : COLOR_BLANCO,
                    color_salir);
 }
 
 static void Menu_Init(void)
 {
+  SD_CerrarFondo();
   estado_actual = ESTADO_MENU;
   opcion_menu = MENU_EMPEZAR;
   despertar_armado = false;
@@ -866,20 +1048,27 @@ static void Menu_Init(void)
 
 static void Menu_Update(void)
 {
-  bool left_actual = Boton_Apachado(BTN_LEFT_GPIO_Port, BTN_LEFT_Pin);
-  bool right_actual = Boton_Apachado(BTN_RIGHT_GPIO_Port, BTN_RIGHT_Pin);
-  bool jump_actual = Boton_Apachado(BTN_JUMP_GPIO_Port, BTN_JUMP_Pin);
-  bool mover_opcion = (left_actual && !left_anterior) ||
-                      (right_actual && !right_anterior);
+  uint8_t control = Control_Leer();
+  bool left_actual = Control_Presionado(control, CONTROL_IZQUIERDA);
+  bool right_actual = Control_Presionado(control, CONTROL_DERECHA);
+  bool jump_actual = Control_Presionado(control, CONTROL_SALTO);
+  bool mover_izquierda = left_actual && !left_anterior;
+  bool mover_derecha = right_actual && !right_anterior;
   bool confirmar = jump_actual && !jump_anterior;
 
   left_anterior = left_actual;
   right_anterior = right_actual;
   jump_anterior = jump_actual;
 
-  if (mover_opcion)
+  if (mover_izquierda)
   {
-    opcion_menu = (opcion_menu == MENU_EMPEZAR) ? MENU_SALIR : MENU_EMPEZAR;
+    opcion_menu = (opcion_menu == 0U) ?
+                  (MENU_TOTAL - 1U) : (opcion_menu - 1U);
+    Menu_Dibujar();
+  }
+  else if (mover_derecha)
+  {
+    opcion_menu = (uint8_t)((opcion_menu + 1U) % MENU_TOTAL);
     Menu_Dibujar();
   }
 
@@ -892,6 +1081,10 @@ static void Menu_Update(void)
       Game_Init();
       jump_apachado = jump_actual;
     }
+    else if (opcion_menu == MENU_LOAD)
+    {
+      Load_Init();
+    }
     else
     {
       Audio_Detener();
@@ -902,12 +1095,172 @@ static void Menu_Update(void)
   }
 }
 
+static void Load_Dibujar(void)
+{
+  const char titulo[] = "SELECCIONAR BOSS";
+  static const int16_t posiciones[TOTAL_BOSSES] = {50, 94, 138, 182};
+  int16_t titulo_x = (int16_t)((LCD_ANCHO - LCD_AnchoTexto(titulo, 3U)) / 2U);
+
+  LCD_Llenar_Pantalla(COLOR_MENU);
+  LCD_DibujarTexto(titulo_x, 10, titulo, 3U, COLOR_TITULO, COLOR_MENU);
+  LCD_Llenar_Rect(18, 38, 284, 3, COLOR_TITULO);
+
+  for (uint8_t i = 0U; i < TOTAL_BOSSES; i++)
+  {
+    uint16_t fondo = (opcion_load == i) ?
+                     colores_boss_claro[i] : COLOR_OPCION;
+    uint16_t texto = (opcion_load == i) ? COLOR_NEGRO : COLOR_BLANCO;
+    int16_t texto_x = (int16_t)((LCD_ANCHO -
+                      LCD_AnchoTexto(nombres_boss[i], 2U)) / 2U);
+
+    LCD_Llenar_Rect(45, posiciones[i], 230, 32, fondo);
+    LCD_DibujarTexto(texto_x, posiciones[i] + 9,
+                     nombres_boss[i], 2U, texto, fondo);
+  }
+}
+
+static void Load_Init(void)
+{
+  estado_actual = ESTADO_LOAD;
+  opcion_load = 0U;
+  Load_Dibujar();
+  Botones_Sincronizar();
+}
+
+static void Load_Update(void)
+{
+  uint8_t control = Control_Leer();
+  bool left_actual = Control_Presionado(control, CONTROL_IZQUIERDA);
+  bool right_actual = Control_Presionado(control, CONTROL_DERECHA);
+  bool jump_actual = Control_Presionado(control, CONTROL_SALTO);
+  bool pause_actual = Control_Presionado(control, CONTROL_PAUSA);
+  bool mover_izquierda = left_actual && !left_anterior;
+  bool mover_derecha = right_actual && !right_anterior;
+  bool confirmar = jump_actual && !jump_anterior;
+  bool volver = pause_actual && !pause_anterior;
+
+  left_anterior = left_actual;
+  right_anterior = right_actual;
+  jump_anterior = jump_actual;
+  pause_anterior = pause_actual;
+
+  if (volver)
+  {
+    Menu_Init();
+    return;
+  }
+
+  if (mover_izquierda)
+  {
+    opcion_load = (opcion_load == 0U) ?
+                  (TOTAL_BOSSES - 1U) : (opcion_load - 1U);
+    Load_Dibujar();
+  }
+  else if (mover_derecha)
+  {
+    opcion_load = (uint8_t)((opcion_load + 1U) % TOTAL_BOSSES);
+    Load_Dibujar();
+  }
+
+  if (confirmar)
+  {
+    Audio_Detener();
+    estado_actual = ESTADO_JUEGO;
+    Game_InitBoss(opcion_load);
+    jump_apachado = jump_actual;
+  }
+}
+
+static void Pausa_Dibujar(void)
+{
+  const char titulo[] = "PAUSA";
+  const char continuar[] = "CONTINUAR";
+  const char salir[] = "SALIR";
+  uint16_t color_continuar = (opcion_pausa == PAUSA_CONTINUAR) ?
+                             COLOR_SELECCION : COLOR_OPCION;
+  uint16_t color_salir = (opcion_pausa == PAUSA_SALIR) ?
+                         COLOR_SELECCION : COLOR_OPCION;
+  int16_t titulo_x = (int16_t)((LCD_ANCHO - LCD_AnchoTexto(titulo, 4U)) / 2U);
+  int16_t continuar_x = (int16_t)((LCD_ANCHO - LCD_AnchoTexto(continuar, 3U)) / 2U);
+  int16_t salir_x = (int16_t)((LCD_ANCHO - LCD_AnchoTexto(salir, 3U)) / 2U);
+
+  LCD_Llenar_Pantalla(COLOR_MENU);
+  LCD_DibujarTexto(titulo_x, 18, titulo, 4U, COLOR_TITULO, COLOR_MENU);
+  LCD_Llenar_Rect(45, 58, 230, 3, COLOR_TITULO);
+
+  LCD_Llenar_Rect(55, 92, 210, 39, color_continuar);
+  LCD_DibujarTexto(continuar_x, 101, continuar, 3U,
+                   (opcion_pausa == PAUSA_CONTINUAR) ? COLOR_NEGRO : COLOR_BLANCO,
+                   color_continuar);
+
+  LCD_Llenar_Rect(55, 148, 210, 39, color_salir);
+  LCD_DibujarTexto(salir_x, 157, salir, 3U,
+                   (opcion_pausa == PAUSA_SALIR) ? COLOR_NEGRO : COLOR_BLANCO,
+                   color_salir);
+}
+
+static void Pausa_Init(void)
+{
+  estado_actual = ESTADO_PAUSA;
+  opcion_pausa = PAUSA_CONTINUAR;
+  pausa_inicio = HAL_GetTick();
+  Audio_PausaIniciar();
+  Pausa_Dibujar();
+  Botones_Sincronizar();
+}
+
+static void Pausa_Continuar(void)
+{
+  uint32_t duracion = HAL_GetTick() - pausa_inicio;
+
+  Audio_Detener();
+  salto_inicio += duracion;
+  proximo_frame_caminata += duracion;
+  proximo_disparo_boss += duracion;
+  estado_actual = ESTADO_JUEGO;
+  Game_DibujarFondo();
+  Game_DibujarJugador(jugador.x, (int16_t)(jugador.y_fp >> FP_SHIFT));
+  Botones_Sincronizar();
+  jump_apachado = jump_anterior;
+}
+
+static void Pausa_Update(void)
+{
+  uint8_t control = Control_Leer();
+  bool left_actual = Control_Presionado(control, CONTROL_IZQUIERDA);
+  bool right_actual = Control_Presionado(control, CONTROL_DERECHA);
+  bool jump_actual = Control_Presionado(control, CONTROL_SALTO);
+  bool pause_actual = Control_Presionado(control, CONTROL_PAUSA);
+  bool mover_opcion = (left_actual && !left_anterior) ||
+                      (right_actual && !right_anterior);
+  bool confirmar = jump_actual && !jump_anterior;
+  bool continuar = pause_actual && !pause_anterior;
+
+  left_anterior = left_actual;
+  right_anterior = right_actual;
+  jump_anterior = jump_actual;
+  pause_anterior = pause_actual;
+
+  if (mover_opcion)
+  {
+    opcion_pausa = (opcion_pausa == PAUSA_CONTINUAR) ?
+                   PAUSA_SALIR : PAUSA_CONTINUAR;
+    Pausa_Dibujar();
+  }
+
+  if (continuar || (confirmar && (opcion_pausa == PAUSA_CONTINUAR)))
+  {
+    Pausa_Continuar();
+  }
+  else if (confirmar && (opcion_pausa == PAUSA_SALIR))
+  {
+    Menu_Init();
+  }
+}
+
 static void Dormido_Update(void)
 {
-  bool algun_boton = Boton_Apachado(BTN_LEFT_GPIO_Port, BTN_LEFT_Pin) ||
-                     Boton_Apachado(BTN_RIGHT_GPIO_Port, BTN_RIGHT_Pin) ||
-                     Boton_Apachado(BTN_JUMP_GPIO_Port, BTN_JUMP_Pin) ||
-                     Boton_Apachado(BTN_SHOOT_GPIO_Port, BTN_SHOOT_Pin);
+  bool algun_boton = Control_Leer() != 0U;
 
   if (!despertar_armado)
   {
@@ -1249,52 +1602,106 @@ static void Game_DibujarPlataforma(const Plataforma_t *plataforma)
 
 static void Game_DibujarBoss(void)
 {
+  uint8_t indice;
   uint16_t color_claro;
   uint16_t color_oscuro;
+  uint16_t fondo;
 
   if (!Game_BossActivo())
   {
     return;
   }
 
-  if (Game_IndiceBoss() == 0U)
+  indice = Game_IndiceBoss();
+  color_claro = colores_boss_claro[indice];
+  color_oscuro = colores_boss_oscuro[indice];
+  fondo = colores_pantalla[pantalla_actual];
+
+  if (indice == 0U)
   {
-    color_claro = 0xF800U;
-    color_oscuro = 0x7800U;
+    LCD_Llenar_Rect(boss_x + 9, BOSS_Y, 14, 3, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 3, 20, 4, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 7, 24, 21, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 28, 20, 5, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 9, BOSS_Y + 33, 14, 3, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 8, BOSS_Y + 4, 16, 3, color_claro);
+    LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 8, 20, 19, color_claro);
+    LCD_Llenar_Rect(boss_x + 8, BOSS_Y + 27, 16, 4, color_claro);
+    LCD_Llenar_Rect(boss_x + 7, BOSS_Y + 9, 4, 7, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 10, BOSS_Y + 13, 4, 7, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 21, BOSS_Y + 9, 4, 7, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 18, BOSS_Y + 13, 4, 7, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 14, BOSS_Y + 17, 4, 8, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 15, BOSS_Y + 20, 2, 3, COLOR_BLANCO);
   }
-  else if (Game_IndiceBoss() == 1U)
+  else if (indice == 1U)
   {
-    color_claro = 0x07E0U;
-    color_oscuro = 0x03E0U;
+    LCD_Llenar_Rect(boss_x + 8, BOSS_Y, 16, 3, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 3, 24, 4, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 2, BOSS_Y + 7, 28, 25, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 32, 20, 4, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 4, 20, 4, color_claro);
+    LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 8, 24, 22, color_claro);
+    LCD_Llenar_Rect(boss_x + 8, BOSS_Y + 30, 16, 3, color_claro);
+    LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 11, 5, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 9, BOSS_Y + 13, 6, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 21, BOSS_Y + 11, 5, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 17, BOSS_Y + 13, 6, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 7, BOSS_Y + 17, 7, 5, COLOR_BLANCO);
+    LCD_Llenar_Rect(boss_x + 18, BOSS_Y + 17, 7, 5, COLOR_BLANCO);
+    LCD_Llenar_Rect(boss_x + 10, BOSS_Y + 18, 3, 4, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 19, BOSS_Y + 18, 3, 4, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 9, BOSS_Y + 26, 14, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 7, BOSS_Y + 29, 4, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 21, BOSS_Y + 29, 4, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 12, BOSS_Y + 27, 3, 2, COLOR_BLANCO);
+    LCD_Llenar_Rect(boss_x + 17, BOSS_Y + 27, 3, 2, COLOR_BLANCO);
+  }
+  else if (indice == 2U)
+  {
+    LCD_Llenar_Rect(boss_x + 1, BOSS_Y, 3, 36, COLOR_BLANCO);
+    LCD_Llenar_Rect(boss_x, BOSS_Y, 5, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 4, 28, 28, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 5, BOSS_Y + 5, 26, 8, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 5, BOSS_Y + 13, 26, 9, 0xF800U);
+    LCD_Llenar_Rect(boss_x + 5, BOSS_Y + 22, 26, 9, 0xFFE0U);
+    LCD_Llenar_Rect(boss_x + 29, BOSS_Y + 5, 2, 3, fondo);
+    LCD_Llenar_Rect(boss_x + 29, BOSS_Y + 28, 2, 3, fondo);
   }
   else
   {
-    color_claro = COLOR_BOSS_CLARO;
-    color_oscuro = COLOR_BOSS_OSCURO;
+    LCD_Llenar_Rect(boss_x + 10, BOSS_Y, 12, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 3, 20, 4, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 3, BOSS_Y + 7, 26, 5, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 1, BOSS_Y + 12, 30, 16, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 28, 24, 5, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 9, BOSS_Y + 33, 14, 3, COLOR_NEGRO);
+    LCD_Llenar_Rect(boss_x + 10, BOSS_Y + 3, 12, 4, color_claro);
+    LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 7, 20, 5, color_claro);
+    LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 12, 23, 16, color_claro);
+    LCD_Llenar_Rect(boss_x + 7, BOSS_Y + 28, 18, 4, color_claro);
+    LCD_Llenar_Rect(boss_x + 10, BOSS_Y + 32, 12, 2, color_claro);
+    LCD_Llenar_Rect(boss_x + 9, BOSS_Y + 12, 4, 5, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 18, BOSS_Y + 12, 4, 5, color_oscuro);
+    LCD_Llenar_Rect(boss_x + 10, BOSS_Y + 12, 2, 2, COLOR_BLANCO);
+    LCD_Llenar_Rect(boss_x + 19, BOSS_Y + 12, 2, 2, COLOR_BLANCO);
+    LCD_Llenar_Rect(boss_x + 24, BOSS_Y + 16, 8, 4, fondo);
+    LCD_Llenar_Rect(boss_x + 20, BOSS_Y + 20, 12, 4, fondo);
+    LCD_Llenar_Rect(boss_x + 24, BOSS_Y + 24, 8, 4, fondo);
   }
-
-  LCD_Llenar_Rect(boss_x + 2, BOSS_Y, 6, 8, color_oscuro);
-  LCD_Llenar_Rect(boss_x + 24, BOSS_Y, 6, 8, color_oscuro);
-  LCD_Llenar_Rect(boss_x, BOSS_Y + 6, 32, 26, color_claro);
-  LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 32, 8, 4, color_oscuro);
-  LCD_Llenar_Rect(boss_x + 20, BOSS_Y + 32, 8, 4, color_oscuro);
-  LCD_Llenar_Rect(boss_x + 7, BOSS_Y + 13, 5, 5, COLOR_BOSS_OJOS);
-  LCD_Llenar_Rect(boss_x + 20, BOSS_Y + 13, 5, 5, COLOR_BOSS_OJOS);
-  LCD_Llenar_Rect(boss_x + 9, BOSS_Y + 15, 2, 2, COLOR_NEGRO);
-  LCD_Llenar_Rect(boss_x + 21, BOSS_Y + 15, 2, 2, COLOR_NEGRO);
-  LCD_Llenar_Rect(boss_x + 9, BOSS_Y + 24, 14, 3, color_oscuro);
 }
 
 static void Game_DibujarVidaBoss(void)
 {
+  uint8_t indice = Game_IndiceBoss();
   uint8_t vida_maxima = Game_VidaMaximaBoss();
-  int16_t ancho = (int16_t)((boss_vida * 84U) / vida_maxima);
+  int16_t ancho = (int16_t)((boss_vida * 94U) / vida_maxima);
 
-  LCD_DibujarTexto(6, 6, "BOSS", 2U, COLOR_BOSS_OJOS,
+  LCD_DibujarTexto(6, 9, nombres_boss[indice], 1U, COLOR_BLANCO,
                    colores_pantalla[pantalla_actual]);
-  LCD_Llenar_Rect(70, 7, 88, 12, COLOR_NEGRO);
-  LCD_Llenar_Rect(72, 9, 84, 8, colores_pantalla[pantalla_actual]);
-  LCD_Llenar_Rect(72, 9, ancho, 8, COLOR_BOSS_OJOS);
+  LCD_Llenar_Rect(58, 7, 98, 12, COLOR_NEGRO);
+  LCD_Llenar_Rect(60, 9, 94, 8, colores_pantalla[pantalla_actual]);
+  LCD_Llenar_Rect(60, 9, ancho, 8, colores_boss_claro[indice]);
 }
 
 static void Game_DibujarVidaJugador(void)
@@ -1459,71 +1866,133 @@ static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
   return false;
 }
 
-static void Game_DibujarFondoPantalla1(void)
+static bool SD_Init(void)
 {
-  for (int16_t fila = 0; fila < FONDO1_ALTO; fila++)
-  {
-    for (int16_t columna = 0; columna < FONDO1_ANCHO; columna++)
-    {
-      uint16_t color = fondo_pantalla_1[(fila * FONDO1_ANCHO) + columna];
+  sd_lista = f_mount(&sd_fatfs, "0:", 1U) == FR_OK;
+  return sd_lista;
+}
 
-      LCD_Llenar_Rect(columna * FONDO1_ESCALA_X,
-                      fila * FONDO1_ESCALA_Y,
-                      FONDO1_ESCALA_X, FONDO1_ESCALA_Y, color);
-    }
+static void SD_CerrarFondo(void)
+{
+  if (fondo_abierto)
+  {
+    f_close(&fondo_archivo);
+    fondo_abierto = false;
+    fondo_indice_abierto = 0xFFU;
   }
 }
 
-static void Game_RestaurarFondo(int16_t x, int16_t y, int16_t ancho, int16_t alto)
+static bool SD_AbrirFondo(uint8_t indice)
 {
-  if (pantalla_actual != 0U)
+  char nombre[] = "0:/FONDO01.BIN";
+
+  if (!sd_lista || (indice >= TOTAL_FONDOS))
   {
-    LCD_Llenar_Rect(x, y, ancho, alto, colores_pantalla[pantalla_actual]);
-    return;
+    return false;
   }
 
+  if (fondo_abierto && (fondo_indice_abierto == indice))
+  {
+    return true;
+  }
+
+  SD_CerrarFondo();
+  indice++;
+  nombre[8] = (char)('0' + (indice / 10U));
+  nombre[9] = (char)('0' + (indice % 10U));
+
+  if (f_open(&fondo_archivo, nombre, FA_READ) != FR_OK)
+  {
+    return false;
+  }
+
+  if (f_size(&fondo_archivo) != FONDO_TAMANO_BYTES)
+  {
+    f_close(&fondo_archivo);
+    return false;
+  }
+
+  fondo_abierto = true;
+  fondo_indice_abierto = (uint8_t)(indice - 1U);
+  return true;
+}
+
+static bool SD_DibujarRegion(uint8_t indice, int16_t x, int16_t y,
+                            int16_t ancho, int16_t alto)
+{
   int16_t x0 = (x < 0) ? 0 : x;
   int16_t y0 = (y < 0) ? 0 : y;
   int16_t x1 = ((x + ancho) > LCD_ANCHO) ? LCD_ANCHO : (x + ancho);
   int16_t y1 = ((y + alto) > LCD_ALTO) ? LCD_ALTO : (y + alto);
+  UINT bytes_leidos;
+  UINT bytes_fila;
 
-  if ((x0 >= x1) || (y0 >= y1))
+  if ((x0 >= x1) || (y0 >= y1) || !SD_AbrirFondo(indice))
   {
-    return;
+    return false;
   }
 
-  int16_t fila_inicial = y0 / FONDO1_ESCALA_Y;
-  int16_t fila_final = (y1 - 1) / FONDO1_ESCALA_Y;
-  int16_t columna_inicial = x0 / FONDO1_ESCALA_X;
-  int16_t columna_final = (x1 - 1) / FONDO1_ESCALA_X;
+  bytes_fila = (UINT)((x1 - x0) * 2);
+  LCD_SetAddressWindow((uint16_t)x0, (uint16_t)y0,
+                       (uint16_t)(x1 - 1), (uint16_t)(y1 - 1));
+  LCD_CS_LOW();
+  LCD_RS_DATA();
 
-  for (int16_t fila = fila_inicial; fila <= fila_final; fila++)
+  for (int16_t fila = y0; fila < y1; fila++)
   {
-    for (int16_t columna = columna_inicial; columna <= columna_final; columna++)
-    {
-      int16_t celda_x0 = columna * FONDO1_ESCALA_X;
-      int16_t celda_y0 = fila * FONDO1_ESCALA_Y;
-      int16_t celda_x1 = celda_x0 + FONDO1_ESCALA_X;
-      int16_t celda_y1 = celda_y0 + FONDO1_ESCALA_Y;
-      int16_t area_x0 = (x0 > celda_x0) ? x0 : celda_x0;
-      int16_t area_y0 = (y0 > celda_y0) ? y0 : celda_y0;
-      int16_t area_x1 = (x1 < celda_x1) ? x1 : celda_x1;
-      int16_t area_y1 = (y1 < celda_y1) ? y1 : celda_y1;
-      uint16_t color = fondo_pantalla_1[(fila * FONDO1_ANCHO) + columna];
+    FSIZE_t posicion = ((FSIZE_t)fila * LCD_ANCHO + (FSIZE_t)x0) * 2U;
 
-      LCD_Llenar_Rect(area_x0, area_y0,
-                      area_x1 - area_x0, area_y1 - area_y0, color);
+    if ((f_lseek(&fondo_archivo, posicion) != FR_OK) ||
+        (f_read(&fondo_archivo, fondo_buffer, bytes_fila,
+                &bytes_leidos) != FR_OK) ||
+        (bytes_leidos != bytes_fila))
+    {
+      LCD_CS_HIGH();
+      SD_CerrarFondo();
+      return false;
     }
+
+    for (int16_t columna = 0; columna < (x1 - x0); columna++)
+    {
+      uint16_t color = fondo_buffer[columna];
+      LCD_Write8((uint8_t)(color >> 8U));
+      LCD_Write8((uint8_t)color);
+    }
+  }
+
+  LCD_CS_HIGH();
+  return true;
+}
+
+static uint8_t Game_IndiceFondo(void)
+{
+  return (uint8_t)(pantalla_actual - (pantalla_actual / 4U));
+}
+
+static void Game_RestaurarFondo(int16_t x, int16_t y, int16_t ancho, int16_t alto)
+{
+  if (Game_EsPantallaBoss() ||
+      !SD_DibujarRegion(Game_IndiceFondo(), x, y, ancho, alto))
+  {
+    LCD_Llenar_Rect(x, y, ancho, alto, colores_pantalla[pantalla_actual]);
   }
 }
 
 static void Game_DibujarFondo(void)
 {
-  if (pantalla_actual == 0U)
+  bool fondo_dibujado = false;
+
+  if (Game_EsPantallaBoss())
   {
-    Game_DibujarFondoPantalla1();
+    SD_CerrarFondo();
   }
   else
+  {
+    fondo_dibujado = SD_DibujarRegion(Game_IndiceFondo(), 0, 0,
+                                      LCD_ANCHO, LCD_ALTO);
+  }
+
+  if (!fondo_dibujado)
   {
     LCD_Llenar_Pantalla(colores_pantalla[pantalla_actual]);
   }
@@ -1553,27 +2022,109 @@ static void Game_DibujarFondo(void)
   }
 }
 
+static const uint16_t *Game_SpriteJugador(void)
+{
+  if (salto_cargando)
+  {
+    return sprite_carga_derecha;
+  }
+
+  if (!jugador.on_ground)
+  {
+    return sprite_aire_derecha;
+  }
+
+  return sprite_idle_derecha;
+}
+
+static void LCD_DibujarSpriteJugador(int16_t x, int16_t y,
+                                     const uint16_t *sprite, bool derecha)
+{
+  for (int16_t fila = 0; fila < JUGADOR_ALTO; fila++)
+  {
+    int16_t pantalla_y = y + fila;
+    int16_t columna = 0;
+
+    if ((pantalla_y < 0) || (pantalla_y >= LCD_ALTO))
+    {
+      continue;
+    }
+
+    while (columna < JUGADOR_ANCHO)
+    {
+      int16_t inicio;
+      int16_t final;
+      int16_t x0;
+      int16_t x1;
+
+      while (columna < JUGADOR_ANCHO)
+      {
+        int16_t origen = derecha ? columna : (JUGADOR_ANCHO - 1 - columna);
+        uint16_t color = sprite[(fila * JUGADOR_ANCHO) + origen];
+
+        if (color != COLOR_TRANSPARENTE)
+        {
+          break;
+        }
+        columna++;
+      }
+
+      if (columna >= JUGADOR_ANCHO)
+      {
+        break;
+      }
+
+      inicio = columna;
+      while (columna < JUGADOR_ANCHO)
+      {
+        int16_t origen = derecha ? columna : (JUGADOR_ANCHO - 1 - columna);
+        uint16_t color = sprite[(fila * JUGADOR_ANCHO) + origen];
+
+        if (color == COLOR_TRANSPARENTE)
+        {
+          break;
+        }
+        columna++;
+      }
+      final = columna - 1;
+      x0 = x + inicio;
+      x1 = x + final;
+
+      if ((x1 < 0) || (x0 >= LCD_ANCHO))
+      {
+        continue;
+      }
+      if (x0 < 0)
+      {
+        x0 = 0;
+      }
+      if (x1 >= LCD_ANCHO)
+      {
+        x1 = LCD_ANCHO - 1;
+      }
+
+      LCD_SetAddressWindow((uint16_t)x0, (uint16_t)pantalla_y,
+                           (uint16_t)x1, (uint16_t)pantalla_y);
+      LCD_CS_LOW();
+      LCD_RS_DATA();
+
+      for (int16_t pantalla_x = x0; pantalla_x <= x1; pantalla_x++)
+      {
+        int16_t destino = pantalla_x - x;
+        int16_t origen = derecha ? destino : (JUGADOR_ANCHO - 1 - destino);
+        uint16_t color = sprite[(fila * JUGADOR_ANCHO) + origen];
+
+        LCD_Write8((uint8_t)(color >> 8U));
+        LCD_Write8((uint8_t)color);
+      }
+      LCD_CS_HIGH();
+    }
+  }
+}
+
 static void Game_DibujarJugador(int16_t x, int16_t y)
 {
-  int16_t ojo_x = jugador_mira_derecha ? 9 : 6;
-
-  LCD_Llenar_Rect(x + 5, y, 6, 6, COLOR_JUGADOR);
-  LCD_Llenar_Rect(x + ojo_x, y + 2, 1, 1, COLOR_NEGRO);
-  LCD_Llenar_Rect(x + 4, y + 6, 8, 8, COLOR_BLANCO);
-  LCD_Llenar_Rect(x + 2, y + 7, 2, 7, COLOR_JUGADOR);
-  LCD_Llenar_Rect(x + 12, y + 7, 2, 7, COLOR_JUGADOR);
-  LCD_Llenar_Rect(x + 4, y + 13, 8, 2, COLOR_NEGRO);
-
-  if (jugador_frame == 0U)
-  {
-    LCD_Llenar_Rect(x + 4, y + 15, 3, 5, COLOR_JUGADOR_DARK);
-    LCD_Llenar_Rect(x + 9, y + 15, 3, 5, COLOR_JUGADOR_DARK);
-  }
-  else
-  {
-    LCD_Llenar_Rect(x + 2, y + 15, 4, 5, COLOR_JUGADOR_DARK);
-    LCD_Llenar_Rect(x + 10, y + 15, 4, 5, COLOR_JUGADOR_DARK);
-  }
+  LCD_DibujarSpriteJugador(x, y, Game_SpriteJugador(), jugador_mira_derecha);
 }
 
 static void Game_BorrarJugador(int16_t x, int16_t y)
@@ -1608,10 +2159,11 @@ static void Game_BorrarJugador(int16_t x, int16_t y)
 
 }
 
-static void Game_Init(void)
+static void Game_Iniciar(uint8_t pantalla_inicial, bool pistola_inicial)
 {
   Audio_Detener();
-  pantalla_actual = 0U;
+  pantalla_actual = (pantalla_inicial < TOTAL_PANTALLAS) ?
+                    pantalla_inicial : 0U;
   jugador.x = (LCD_ANCHO - JUGADOR_ANCHO) / 2;
   jugador.vx = 0;
   jugador.y_fp = (int32_t)(PISO_Y - JUGADOR_ALTO) * FP_UNO;
@@ -1625,38 +2177,73 @@ static void Game_Init(void)
   jugador_mira_derecha = true;
   proximo_frame_caminata = HAL_GetTick() + WALK_FRAME_MS;
   memset(bosses_derrotados, 0, sizeof(bosses_derrotados));
+  for (uint8_t i = 0U; i < (pantalla_actual / 4U); i++)
+  {
+    bosses_derrotados[i] = true;
+  }
   boss_vida = 0U;
   disparo_activo = false;
   disparo_dx = 0;
   disparo_dy = 0;
-  tiene_pistola = false;
+  tiene_pistola = pistola_inicial;
   shoot_anterior = false;
+  pause_anterior = Control_Presionado(Control_Leer(), CONTROL_PAUSA);
   Game_LimpiarDisparosBoss();
   proximo_disparo_boss = 0U;
   patron_disparo_boss = 0U;
   vida_jugador = 0U;
   salto_en_curso = false;
 
+  if (Game_BossActivo())
+  {
+    Game_BossInit();
+  }
+
   Game_DibujarFondo();
   Game_DibujarJugador(jugador.x, (int16_t)(jugador.y_fp >> FP_SHIFT));
 }
 
+static void Game_Init(void)
+{
+  Game_Iniciar(0U, false);
+}
+
+static void Game_InitBoss(uint8_t indice)
+{
+  if (indice >= TOTAL_BOSSES)
+  {
+    indice = 0U;
+  }
+
+  Game_Iniciar((uint8_t)((indice * 4U) + 3U), true);
+}
+
 static void Game_Update(void)
 {
-  bool left_apachado = Boton_Apachado(BTN_LEFT_GPIO_Port, BTN_LEFT_Pin);
-  bool right_apachado = Boton_Apachado(BTN_RIGHT_GPIO_Port, BTN_RIGHT_Pin);
-  bool jump_pressed = Boton_Apachado(BTN_JUMP_GPIO_Port, BTN_JUMP_Pin);
-  bool shoot_pressed = Boton_Apachado(BTN_SHOOT_GPIO_Port, BTN_SHOOT_Pin);
+  uint8_t control = Control_Leer();
+  bool left_apachado = Control_Presionado(control, CONTROL_IZQUIERDA);
+  bool right_apachado = Control_Presionado(control, CONTROL_DERECHA);
+  bool jump_pressed = Control_Presionado(control, CONTROL_SALTO);
+  bool shoot_pressed = Control_Presionado(control, CONTROL_DISPARO);
+  bool pause_pressed = Control_Presionado(control, CONTROL_PAUSA);
   bool disparar = shoot_pressed && !shoot_anterior && tiene_pistola;
   int16_t old_x = jugador.x;
   int16_t old_y = (int16_t)(jugador.y_fp >> FP_SHIFT);
   uint8_t old_frame = jugador_frame;
   bool old_direccion = jugador_mira_derecha;
+  bool old_salto_cargando = salto_cargando;
   bool cambio_pantalla = false;
   bool colision_pared = false;
   bool estaba_en_suelo = jugador.on_ground;
   int16_t movimiento_x = 0;
 
+  if (pause_pressed && !pause_anterior)
+  {
+    Pausa_Init();
+    return;
+  }
+
+  pause_anterior = pause_pressed;
   shoot_anterior = shoot_pressed;
 
   if (Game_BossActivo())
@@ -1960,7 +2547,9 @@ static void Game_Update(void)
 
   if ((jugador.x != old_x) || (new_y != old_y) ||
       (jugador_frame != old_frame) ||
-      (jugador_mira_derecha != old_direccion))
+      (jugador_mira_derecha != old_direccion) ||
+      (salto_cargando != old_salto_cargando) ||
+      (jugador.on_ground != estaba_en_suelo))
   {
     Game_BorrarJugador(old_x, old_y);
     Game_DibujarJugador(jugador.x, new_y);
@@ -2005,12 +2594,17 @@ int main(void)
   MX_GPIO_Init();
   MX_USART2_UART_Init();
   MX_TIM10_Init();
+  MX_UART4_Init();
+  MX_SPI1_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
   Audio_Init();
+  Control_Iniciar();
 
   //Deseleccionar los dispositivos SPI
   HAL_GPIO_WritePin(F_CS_GPIO_Port, F_CS_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
+  SD_Init();
 
   LCD_HardwareReset();
 
@@ -2034,9 +2628,17 @@ int main(void)
       {
         Menu_Update();
       }
+      else if (estado_actual == ESTADO_LOAD)
+      {
+        Load_Update();
+      }
       else if (estado_actual == ESTADO_JUEGO)
       {
         Game_Update();
+      }
+      else if (estado_actual == ESTADO_PAUSA)
+      {
+        Pausa_Update();
       }
       else
       {
@@ -2115,6 +2717,44 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
   * @brief TIM10 Initialization Function
   * @param None
   * @retval None
@@ -2157,6 +2797,39 @@ static void MX_TIM10_Init(void)
 
   /* USER CODE END TIM10_Init 2 */
   HAL_TIM_MspPostInit(&htim10);
+
+}
+
+/**
+  * @brief UART4 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_UART4_Init(void)
+{
+
+  /* USER CODE BEGIN UART4_Init 0 */
+
+  /* USER CODE END UART4_Init 0 */
+
+  /* USER CODE BEGIN UART4_Init 1 */
+
+  /* USER CODE END UART4_Init 1 */
+  huart4.Instance = UART4;
+  huart4.Init.BaudRate = 115200;
+  huart4.Init.WordLength = UART_WORDLENGTH_8B;
+  huart4.Init.StopBits = UART_STOPBITS_1;
+  huart4.Init.Parity = UART_PARITY_NONE;
+  huart4.Init.Mode = UART_MODE_TX_RX;
+  huart4.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart4.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN UART4_Init 2 */
+
+  /* USER CODE END UART4_Init 2 */
 
 }
 
@@ -2218,8 +2891,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOA, LCD_RD_Pin|LCD_WR_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, LCD_RS_Pin|LD2_Pin|LCD_D7_Pin|LCD_D0_Pin
-                          |LCD_D2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LCD_RS_Pin|LCD_D7_Pin|LCD_D0_Pin|LCD_D2_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LCD_CS_Pin|SD_CS_Pin, GPIO_PIN_SET);
@@ -2252,13 +2924,6 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : LD2_Pin */
-  GPIO_InitStruct.Pin = LD2_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(LD2_GPIO_Port, &GPIO_InitStruct);
-
   /*Configure GPIO pins : LCD_CS_Pin LCD_D6_Pin LCD_D3_Pin LCD_D5_Pin
                            LCD_D4_Pin SD_CS_Pin */
   GPIO_InitStruct.Pin = LCD_CS_Pin|LCD_D6_Pin|LCD_D3_Pin|LCD_D5_Pin
@@ -2268,20 +2933,36 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : BTN_PAUSE_Pin BTN_SHOOT_Pin BTN_LEFT_Pin BTN_RIGHT_Pin
-                           BTN_JUMP_Pin */
-  GPIO_InitStruct.Pin = BTN_PAUSE_Pin|BTN_SHOOT_Pin|BTN_LEFT_Pin|BTN_RIGHT_Pin
-                          |BTN_JUMP_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
-  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
-
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == UART4)
+  {
+    if ((control_rx_byte & CONTROL_VALIDO) != 0U)
+    {
+      control_estado = control_rx_byte &
+                       (CONTROL_IZQUIERDA | CONTROL_DERECHA |
+                        CONTROL_SALTO | CONTROL_DISPARO | CONTROL_PAUSA);
+      control_ultimo_ms = HAL_GetTick();
+    }
+
+    HAL_UART_Receive_IT(&huart4, &control_rx_byte, 1U);
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == UART4)
+  {
+    control_estado = 0U;
+    HAL_UART_Receive_IT(&huart4, &control_rx_byte, 1U);
+  }
+}
 /* USER CODE END 4 */
 
 /**

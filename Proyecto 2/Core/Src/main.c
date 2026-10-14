@@ -29,6 +29,7 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+//Datos físicos del jugador
 typedef struct
 {
   int16_t x;
@@ -38,6 +39,7 @@ typedef struct
   bool on_ground;
 } Jugador_t;
 
+//Datos de cada plataforma
 typedef struct
 {
   int16_t x;
@@ -46,6 +48,7 @@ typedef struct
   int16_t alto;
 } Plataforma_t;
 
+//Datos de proyectiles enemigos
 typedef struct
 {
   int16_t x;
@@ -55,6 +58,7 @@ typedef struct
   bool activo;
 } DisparoBoss_t;
 
+//Estados generales del juego
 typedef enum
 {
   ESTADO_MENU = 0,
@@ -64,12 +68,14 @@ typedef enum
   ESTADO_DORMIDO
 } Estado_t;
 
+//Datos de cada nota
 typedef struct
 {
   uint16_t frecuencia;
   uint16_t duracion;
 } Nota_t;
 
+//Estados actuales del audio
 typedef enum
 {
   AUDIO_SILENCIO = 0,
@@ -81,11 +87,13 @@ typedef enum
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+//Dimensiones de la pantalla
 #define LCD_ANCHO               320
 #define LCD_ALTO                240
 #define TOTAL_FONDOS             12U
 #define FONDO_TAMANO_BYTES   153600UL
 
+//Colores principales RGB565
 #define COLOR_NEGRO             0x0000U
 #define COLOR_BLANCO            0xFFFFU
 #define COLOR_CIELO             0x10A6U
@@ -102,6 +110,7 @@ typedef enum
 #define COLOR_BOSS_OJOS         0xFFE0U
 #define COLOR_TRANSPARENTE      0x0000U
 
+//Configuración general del jugador
 #define JUGADOR_ANCHO            16
 #define JUGADOR_ALTO             20
 #define WALK_FRAMES               2U
@@ -137,6 +146,7 @@ typedef enum
 #define MAX_FALL_SPEED_FP         2048L
 #define FRAME_TIME_MS             16U
 
+//Máscaras recibidas del control
 #define CONTROL_VALIDO            0x80U
 #define CONTROL_IZQUIERDA         0x01U
 #define CONTROL_DERECHA           0x02U
@@ -145,6 +155,7 @@ typedef enum
 #define CONTROL_PAUSA             0x10U
 #define CONTROL_TIMEOUT_MS         250U
 
+//Opciones de cada menú
 #define MENU_EMPEZAR               0U
 #define MENU_LOAD                  1U
 #define MENU_SALIR                 2U
@@ -153,8 +164,10 @@ typedef enum
 #define PAUSA_CONTINUAR             0U
 #define PAUSA_SALIR                 1U
 
+//Frecuencia base del audio
 #define AUDIO_TIMER_HZ        1000000UL
 
+//Máscaras del bus LCD
 #define LCD_DATA_A_MASK           (LCD_D0_Pin | LCD_D2_Pin | LCD_D7_Pin)
 #define LCD_DATA_B_MASK           (LCD_D3_Pin | LCD_D4_Pin | LCD_D5_Pin | LCD_D6_Pin)
 #define LCD_DATA_C_MASK           (LCD_D1_Pin)
@@ -182,11 +195,13 @@ UART_HandleTypeDef huart4;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
+//Estado físico del jugador
 static Jugador_t jugador;
 static bool jump_apachado = false;
 static bool salto_cargando = false;
 static uint32_t salto_inicio = 0U;
 static int8_t salto_direccion = 0;
+//Estado actual de menús
 static Estado_t estado_actual = ESTADO_MENU;
 static uint8_t opcion_menu = MENU_EMPEZAR;
 static uint8_t opcion_load = 0U;
@@ -198,37 +213,45 @@ static bool pause_anterior = false;
 static bool despertar_armado = false;
 static uint8_t opcion_pausa = PAUSA_CONTINUAR;
 static uint32_t pausa_inicio = 0U;
+//Estado visual del jugador
 static uint8_t jugador_frame = 0U;
 static bool jugador_mira_derecha = true;
 static uint32_t proximo_frame_caminata = 0U;
+//Progreso actual del juego
 static uint8_t pantalla_actual = 0U;
 static bool bosses_derrotados[4] = {false, false, false, false};
 static int16_t boss_x = 0;
 static int8_t boss_direccion = 1;
 static uint8_t boss_vida = 0U;
+//Disparo principal del jugador
 static bool disparo_activo = false;
 static int16_t disparo_x = 0;
 static int16_t disparo_y = 0;
 static int16_t disparo_dx = 0;
 static int16_t disparo_dy = 0;
 static bool tiene_pistola = false;
+//Disparos generados por bosses
 static DisparoBoss_t disparos_boss[BOSS_DISPAROS_MAX];
 static uint32_t proximo_disparo_boss = 0U;
 static uint8_t patron_disparo_boss = 0U;
 static uint8_t vida_jugador = 0U;
 static bool salto_en_curso = false;
+//Recepción del control inalámbrico
 static uint8_t control_rx_byte = 0U;
 static volatile uint8_t control_estado = 0U;
 static volatile uint32_t control_ultimo_ms = 0U;
+//Archivos guardados en SD
 static FATFS sd_fatfs;
 static FIL fondo_archivo;
 static bool sd_lista = false;
 static bool fondo_abierto = false;
 static uint8_t fondo_indice_abierto = 0xFFU;
 static uint16_t fondo_buffer[LCD_ANCHO];
+//Estado actual del audio
 static AudioEstado_t audio_estado = AUDIO_SILENCIO;
 static uint8_t audio_indice = 0U;
 static uint32_t audio_siguiente = 0U;
+//Música del menú principal
 static const Nota_t musica_menu[] = {
   {523U, 140U}, {659U, 140U}, {784U, 180U}, {1047U, 260U},
   {0U, 70U}, {988U, 140U}, {784U, 140U}, {659U, 220U},
@@ -244,6 +267,7 @@ static const Nota_t musica_menu[] = {
   {0U, 100U}, {784U, 160U}, {659U, 160U}, {587U, 200U},
   {523U, 420U}, {0U, 650U}
 };
+//Música del menú pausa
 static const Nota_t musica_pausa[] = {
   {220U, 260U}, {262U, 260U}, {330U, 420U}, {0U, 120U},
   {294U, 260U}, {262U, 260U}, {220U, 420U}, {0U, 160U},
@@ -253,18 +277,23 @@ static const Nota_t musica_pausa[] = {
   {0U, 200U}, {196U, 300U}, {247U, 300U}, {220U, 600U},
   {0U, 500U}
 };
+//Sonido usado al aterrizar
 static const Nota_t efecto_aterrizaje[] = {
   {262U, 35U}, {196U, 65U}
 };
+//Nombres de los bosses
 static const char *const nombres_boss[4] = {
   "CHANCLA", "BRAVA", "ALEMANIA", "GRASA"
 };
+//Colores claros de bosses
 static const uint16_t colores_boss_claro[4] = {
   0x8010U, 0xF800U, 0xFB56U, 0xFFE0U
 };
+//Colores oscuros de bosses
 static const uint16_t colores_boss_oscuro[4] = {
   0x4008U, 0x7800U, 0xA18FU, 0xA500U
 };
+//Sprite quieto mirando derecha
 static const uint16_t sprite_idle_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
@@ -287,6 +316,7 @@ static const uint16_t sprite_idle_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000,
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000
 };
+//Sprite cargando el salto
 static const uint16_t sprite_carga_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38,
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38,
@@ -309,6 +339,7 @@ static const uint16_t sprite_carga_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6800, 0x6800, 0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
 };
+//Sprite durante el salto
 static const uint16_t sprite_aire_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0x0000, 0xf800, 0x0000, 0x0000, 0xf800,
   0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xfe38, 0xf800, 0xf800, 0xf800, 0x0000,
@@ -331,12 +362,14 @@ static const uint16_t sprite_aire_derecha[JUGADOR_ANCHO * JUGADOR_ALTO] = {
   0x6800, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
   0x0000, 0x6800, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000
 };
+//Fondos simples de respaldo
 static const uint16_t colores_pantalla[TOTAL_PANTALLAS] = {
   0x10A6U, 0x2149U, 0x3128U, 0x1803U,
   0x1003U, 0x0328U, 0x03CBU, 0x046DU,
   0x0183U, 0x3006U, 0x4008U, 0x600CU,
   0x8010U, 0x2004U, 0x0801U, 0x1800U
 };
+//Plataformas de cada pantalla
 static const Plataforma_t plataformas[TOTAL_PANTALLAS][PLATAFORMAS_PANTALLA] = {
   {
     {25, 170, 90, 8},
@@ -451,6 +484,7 @@ static const Plataforma_t plataformas[TOTAL_PANTALLAS][PLATAFORMAS_PANTALLA] = {
     {90, 30, 100, 8}
   }
 };
+//Fuente básica de texto
 static const uint8_t fuente_5x7[26][5] = {
   {0x7EU, 0x11U, 0x11U, 0x11U, 0x7EU},
   {0x7FU, 0x49U, 0x49U, 0x49U, 0x36U},
@@ -489,6 +523,7 @@ static void MX_TIM10_Init(void);
 static void MX_UART4_Init(void);
 static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
+//Funciones para el audio
 static void Audio_Tono(uint16_t frecuencia);
 static void Audio_Detener(void);
 static void Audio_Init(void);
@@ -496,6 +531,7 @@ static void Audio_MenuIniciar(void);
 static void Audio_PausaIniciar(void);
 static void Audio_EfectoAterrizaje(void);
 static void Audio_Update(void);
+//Funciones para la pantalla
 static inline void LCD_Write8(uint8_t value);
 static void LCD_HardwareReset(void);
 static void LCD_WriteCommand(uint8_t command);
@@ -512,25 +548,31 @@ static uint16_t LCD_AnchoTexto(const char *texto, uint8_t escala);
 static void LCD_Apagar(void);
 static void LCD_Encender(void);
 
+//Funciones para el control
 static void Control_Iniciar(void);
 static uint8_t Control_Leer(void);
 static bool Control_Presionado(uint8_t estado, uint8_t boton);
 static void Botones_Sincronizar(void);
+//Funciones del menú principal
 static void Menu_Dibujar(void);
 static void Menu_Init(void);
 static void Menu_Update(void);
+//Funciones del selector LOAD
 static void Load_Dibujar(void);
 static void Load_Init(void);
 static void Load_Update(void);
+//Funciones del menú pausa
 static void Pausa_Dibujar(void);
 static void Pausa_Init(void);
 static void Pausa_Continuar(void);
 static void Pausa_Update(void);
 static void Dormido_Update(void);
+//Funciones físicas del juego
 static bool Game_TraslapeHorizontal(int16_t x, const Plataforma_t *plataforma);
 static bool Game_TieneSoporte(int16_t x, int16_t y);
 static int16_t Game_ResolverHorizontal(int16_t old_x, int16_t new_x, int16_t y);
 static int16_t Game_ResolverVertical(int16_t old_y, int16_t new_y);
+//Funciones para los bosses
 static bool Game_EsPantallaBoss(void);
 static uint8_t Game_IndiceBoss(void);
 static bool Game_BossActivo(void);
@@ -542,6 +584,7 @@ static void Game_CrearDisparoBoss(void);
 static void Game_DibujarDisparosBoss(void);
 static bool Game_ActualizarDisparosBoss(void);
 static bool Game_ActualizarBoss(bool disparar, bool *golpeado);
+//Funciones para los disparos
 static bool Game_JugadorTocaPistola(int16_t x, int16_t y);
 static bool Game_DisparoTocaPlataforma(void);
 static void Game_IniciarDisparo(void);
@@ -553,12 +596,14 @@ static void Game_DibujarVidaJugador(void);
 static void Game_DibujarDisparo(void);
 static void Game_DibujarPistola(void);
 static void Game_BorrarDisparo(int16_t x, int16_t y);
+//Funciones para la microSD
 static bool SD_Init(void);
 static void SD_CerrarFondo(void);
 static bool SD_AbrirFondo(uint8_t indice);
 static bool SD_DibujarRegion(uint8_t indice, int16_t x, int16_t y,
                             int16_t ancho, int16_t alto);
 static uint8_t Game_IndiceFondo(void);
+//Funciones de dibujo general
 static void Game_RestaurarFondo(int16_t x, int16_t y, int16_t ancho, int16_t alto);
 static void Game_DibujarFondo(void);
 static const uint16_t *Game_SpriteJugador(void);
@@ -566,6 +611,7 @@ static void LCD_DibujarSpriteJugador(int16_t x, int16_t y,
                                      const uint16_t *sprite, bool derecha);
 static void Game_DibujarJugador(int16_t x, int16_t y);
 static void Game_BorrarJugador(int16_t x, int16_t y);
+//Funciones principales del juego
 static void Game_Iniciar(uint8_t pantalla_inicial, bool pistola_inicial);
 static void Game_Init(void);
 static void Game_InitBoss(uint8_t indice);
@@ -575,6 +621,7 @@ static void Game_Update(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+//Genera una frecuencia PWM
 static void Audio_Tono(uint16_t frecuencia)
 {
   uint32_t periodo;
@@ -597,6 +644,7 @@ static void Audio_Tono(uint16_t frecuencia)
   htim10.Instance->EGR = TIM_EGR_UG;
 }
 
+//Detiene todo el audio
 static void Audio_Detener(void)
 {
   audio_estado = AUDIO_SILENCIO;
@@ -605,6 +653,7 @@ static void Audio_Detener(void)
   Audio_Tono(0U);
 }
 
+//Inicializa el audio PWM
 static void Audio_Init(void)
 {
   if (HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1) != HAL_OK)
@@ -615,6 +664,7 @@ static void Audio_Init(void)
   Audio_Detener();
 }
 
+//Inicia música del menú
 static void Audio_MenuIniciar(void)
 {
   audio_estado = AUDIO_MENU;
@@ -623,6 +673,7 @@ static void Audio_MenuIniciar(void)
   audio_siguiente = HAL_GetTick() + musica_menu[0].duracion;
 }
 
+//Inicia música de pausa
 static void Audio_PausaIniciar(void)
 {
   audio_estado = AUDIO_PAUSA;
@@ -631,6 +682,7 @@ static void Audio_PausaIniciar(void)
   audio_siguiente = HAL_GetTick() + musica_pausa[0].duracion;
 }
 
+//Reproduce sonido de aterrizaje
 static void Audio_EfectoAterrizaje(void)
 {
   audio_estado = AUDIO_ATERRIZAJE;
@@ -639,6 +691,7 @@ static void Audio_EfectoAterrizaje(void)
   audio_siguiente = HAL_GetTick() + efecto_aterrizaje[0].duracion;
 }
 
+//Actualiza notas pendientes
 static void Audio_Update(void)
 {
   const Nota_t *nota;
@@ -716,6 +769,7 @@ static inline void LCD_Write8(uint8_t value)
   LCD_WR_HIGH();
 }
 
+//Reinicia físicamente la pantalla
 static void LCD_HardwareReset(void)
 {
   LCD_CS_HIGH();
@@ -730,6 +784,7 @@ static void LCD_HardwareReset(void)
   HAL_Delay(150U);
 }
 
+//Envía comando al LCD
 static void LCD_WriteCommand(uint8_t command)
 {
   LCD_CS_LOW();
@@ -738,6 +793,7 @@ static void LCD_WriteCommand(uint8_t command)
   LCD_CS_HIGH();
 }
 
+//Envía comando con datos
 static void LCD_WriteCommandData(uint8_t command, const uint8_t *data, uint32_t length)
 {
   LCD_CS_LOW();
@@ -753,6 +809,7 @@ static void LCD_WriteCommandData(uint8_t command, const uint8_t *data, uint32_t 
   LCD_CS_HIGH();
 }
 
+//Configura controlador ILI9341
 static void LCD_InitPantalla(void)
 {
   static const uint8_t power_b[] = {0x00U, 0xC1U, 0x30U};
@@ -809,6 +866,7 @@ static void LCD_InitPantalla(void)
   HAL_Delay(20U);
 }
 
+//Selecciona región de escritura
 static void LCD_SetAddressWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
   uint8_t column_data[4] = {
@@ -825,6 +883,7 @@ static void LCD_SetAddressWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t
   LCD_WriteCommand(0x2CU);
 }
 
+//Rellena una región
 static void LCD_Llenar_Rect(int16_t x, int16_t y, int16_t width, int16_t height, uint16_t color)
 {
   if ((width <= 0) || (height <= 0) || (x >= LCD_ANCHO) || (y >= LCD_ALTO))
@@ -880,11 +939,13 @@ static void LCD_Llenar_Rect(int16_t x, int16_t y, int16_t width, int16_t height,
   LCD_CS_HIGH();
 }
 
+//Limpia toda la pantalla
 static void LCD_Llenar_Pantalla(uint16_t color)
 {
   LCD_Llenar_Rect(0, 0, LCD_ANCHO, LCD_ALTO, color);
 }
 
+//Dibuja un carácter
 static void LCD_DibujarCaracter(int16_t x, int16_t y, char caracter, uint8_t escala,
                                 uint16_t color, uint16_t fondo)
 {
@@ -928,6 +989,7 @@ static void LCD_DibujarCaracter(int16_t x, int16_t y, char caracter, uint8_t esc
   }
 }
 
+//Dibuja cadenas completas
 static void LCD_DibujarTexto(int16_t x, int16_t y, const char *texto, uint8_t escala,
                             uint16_t color, uint16_t fondo)
 {
@@ -939,6 +1001,7 @@ static void LCD_DibujarTexto(int16_t x, int16_t y, const char *texto, uint8_t es
   }
 }
 
+//Calcula ancho del texto
 static uint16_t LCD_AnchoTexto(const char *texto, uint8_t escala)
 {
   uint16_t caracteres = (uint16_t)strlen(texto);
@@ -951,6 +1014,7 @@ static uint16_t LCD_AnchoTexto(const char *texto, uint8_t escala)
   return (uint16_t)((caracteres * 6U * escala) - escala);
 }
 
+//Apaga la pantalla
 static void LCD_Apagar(void)
 {
   LCD_Llenar_Pantalla(COLOR_NEGRO);
@@ -960,6 +1024,7 @@ static void LCD_Apagar(void)
   HAL_Delay(120U);
 }
 
+//Enciende la pantalla
 static void LCD_Encender(void)
 {
   LCD_WriteCommand(0x11U);
@@ -968,6 +1033,7 @@ static void LCD_Encender(void)
   HAL_Delay(20U);
 }
 
+//Inicia recepción por UART
 static void Control_Iniciar(void)
 {
   control_estado = 0U;
@@ -975,6 +1041,7 @@ static void Control_Iniciar(void)
   HAL_UART_Receive_IT(&huart4, &control_rx_byte, 1U);
 }
 
+//Obtiene control vigente
 static uint8_t Control_Leer(void)
 {
   if ((HAL_GetTick() - control_ultimo_ms) > CONTROL_TIMEOUT_MS)
@@ -985,11 +1052,13 @@ static uint8_t Control_Leer(void)
   return control_estado;
 }
 
+//Comprueba botón presionado
 static bool Control_Presionado(uint8_t estado, uint8_t boton)
 {
   return (estado & boton) != 0U;
 }
 
+//Guarda estados anteriores
 static void Botones_Sincronizar(void)
 {
   uint8_t control = Control_Leer();
@@ -1001,6 +1070,7 @@ static void Botones_Sincronizar(void)
   pause_anterior = Control_Presionado(control, CONTROL_PAUSA);
 }
 
+//Dibuja menú principal
 static void Menu_Dibujar(void)
 {
   const char titulo[] = "EX-Machina";
@@ -1035,6 +1105,7 @@ static void Menu_Dibujar(void)
                    color_salir);
 }
 
+//Abre menú principal
 static void Menu_Init(void)
 {
   SD_CerrarFondo();
@@ -1046,6 +1117,7 @@ static void Menu_Init(void)
   Audio_MenuIniciar();
 }
 
+//Procesa menú principal
 static void Menu_Update(void)
 {
   uint8_t control = Control_Leer();
@@ -1095,6 +1167,7 @@ static void Menu_Update(void)
   }
 }
 
+//Dibuja selector de bosses
 static void Load_Dibujar(void)
 {
   const char titulo[] = "SELECCIONAR BOSS";
@@ -1119,6 +1192,7 @@ static void Load_Dibujar(void)
   }
 }
 
+//Abre selector LOAD
 static void Load_Init(void)
 {
   estado_actual = ESTADO_LOAD;
@@ -1127,6 +1201,7 @@ static void Load_Init(void)
   Botones_Sincronizar();
 }
 
+//Procesa selector LOAD
 static void Load_Update(void)
 {
   uint8_t control = Control_Leer();
@@ -1171,6 +1246,7 @@ static void Load_Update(void)
   }
 }
 
+//Dibuja menú de pausa
 static void Pausa_Dibujar(void)
 {
   const char titulo[] = "PAUSA";
@@ -1199,6 +1275,7 @@ static void Pausa_Dibujar(void)
                    color_salir);
 }
 
+//Activa pausa del juego
 static void Pausa_Init(void)
 {
   estado_actual = ESTADO_PAUSA;
@@ -1209,6 +1286,7 @@ static void Pausa_Init(void)
   Botones_Sincronizar();
 }
 
+//Reanuda partida pausada
 static void Pausa_Continuar(void)
 {
   uint32_t duracion = HAL_GetTick() - pausa_inicio;
@@ -1224,6 +1302,7 @@ static void Pausa_Continuar(void)
   jump_apachado = jump_anterior;
 }
 
+//Procesa menú de pausa
 static void Pausa_Update(void)
 {
   uint8_t control = Control_Leer();
@@ -1258,6 +1337,7 @@ static void Pausa_Update(void)
   }
 }
 
+//Espera botón para despertar
 static void Dormido_Update(void)
 {
   bool algun_boton = Control_Leer() != 0U;
@@ -1278,12 +1358,14 @@ static void Dormido_Update(void)
   }
 }
 
+//Comprueba cruce horizontal
 static bool Game_TraslapeHorizontal(int16_t x, const Plataforma_t *plataforma)
 {
   return ((x + JUGADOR_ANCHO) > plataforma->x) &&
          (x < (plataforma->x + plataforma->ancho));
 }
 
+//Comprueba apoyo inferior
 static bool Game_TieneSoporte(int16_t x, int16_t y)
 {
   int16_t pies = y + JUGADOR_ALTO;
@@ -1310,6 +1392,7 @@ static bool Game_TieneSoporte(int16_t x, int16_t y)
   return false;
 }
 
+//Resuelve colisiones horizontales
 static int16_t Game_ResolverHorizontal(int16_t old_x, int16_t new_x, int16_t y)
 {
   if (!Game_PlataformasActivas())
@@ -1346,6 +1429,7 @@ static int16_t Game_ResolverHorizontal(int16_t old_x, int16_t new_x, int16_t y)
   return new_x;
 }
 
+//Resuelve colisiones verticales
 static int16_t Game_ResolverVertical(int16_t old_y, int16_t new_y)
 {
   if (new_y > old_y)
@@ -1421,32 +1505,38 @@ static int16_t Game_ResolverVertical(int16_t old_y, int16_t new_y)
   return new_y;
 }
 
+//Detecta pantalla de boss
 static bool Game_EsPantallaBoss(void)
 {
   return ((pantalla_actual + 1U) % 4U) == 0U;
 }
 
+//Obtiene índice del boss
 static uint8_t Game_IndiceBoss(void)
 {
   return pantalla_actual / 4U;
 }
 
+//Comprueba boss activo
 static bool Game_BossActivo(void)
 {
   return Game_EsPantallaBoss() &&
          !bosses_derrotados[Game_IndiceBoss()];
 }
 
+//Comprueba plataformas activas
 static bool Game_PlataformasActivas(void)
 {
   return !Game_BossActivo();
 }
 
+//Calcula vida del boss
 static uint8_t Game_VidaMaximaBoss(void)
 {
   return (uint8_t)(3U + (Game_IndiceBoss() * 2U));
 }
 
+//Inicializa combate del boss
 static void Game_BossInit(void)
 {
   boss_x = (LCD_ANCHO - BOSS_ANCHO) / 2;
@@ -1461,11 +1551,13 @@ static void Game_BossInit(void)
   proximo_disparo_boss = HAL_GetTick() + 500U;
 }
 
+//Elimina proyectiles enemigos
 static void Game_LimpiarDisparosBoss(void)
 {
   memset(disparos_boss, 0, sizeof(disparos_boss));
 }
 
+//Crea proyectil enemigo
 static void Game_CrearDisparoBoss(void)
 {
   static const int8_t direcciones[5] = {-2, 2, -1, 1, 0};
@@ -1485,6 +1577,7 @@ static void Game_CrearDisparoBoss(void)
   }
 }
 
+//Dibuja proyectiles enemigos
 static void Game_DibujarDisparosBoss(void)
 {
   for (uint8_t i = 0U; i < BOSS_DISPAROS_MAX; i++)
@@ -1498,6 +1591,7 @@ static void Game_DibujarDisparosBoss(void)
   }
 }
 
+//Actualiza proyectiles enemigos
 static bool Game_ActualizarDisparosBoss(void)
 {
   bool golpeado = false;
@@ -1546,6 +1640,7 @@ static bool Game_ActualizarDisparosBoss(void)
   return golpeado;
 }
 
+//Detecta recogida de pistola
 static bool Game_JugadorTocaPistola(int16_t x, int16_t y)
 {
   return (pantalla_actual == 0U) && !tiene_pistola &&
@@ -1555,6 +1650,7 @@ static bool Game_JugadorTocaPistola(int16_t x, int16_t y)
          (y < (PISTOLA_Y + PISTOLA_ALTO));
 }
 
+//Detecta impacto con plataforma
 static bool Game_DisparoTocaPlataforma(void)
 {
   if (!Game_PlataformasActivas())
@@ -1578,6 +1674,7 @@ static bool Game_DisparoTocaPlataforma(void)
   return false;
 }
 
+//Crea disparo del jugador
 static void Game_IniciarDisparo(void)
 {
   if (!tiene_pistola || disparo_activo)
@@ -1592,6 +1689,7 @@ static void Game_IniciarDisparo(void)
   disparo_activo = true;
 }
 
+//Dibuja una plataforma
 static void Game_DibujarPlataforma(const Plataforma_t *plataforma)
 {
   LCD_Llenar_Rect(plataforma->x, plataforma->y,
@@ -1600,6 +1698,7 @@ static void Game_DibujarPlataforma(const Plataforma_t *plataforma)
                   plataforma->ancho, 2, COLOR_PISO_TOP);
 }
 
+//Dibuja el boss actual
 static void Game_DibujarBoss(void)
 {
   uint8_t indice;
@@ -1619,6 +1718,7 @@ static void Game_DibujarBoss(void)
 
   if (indice == 0U)
   {
+    //Boss con forma chancla
     LCD_Llenar_Rect(boss_x + 9, BOSS_Y, 14, 3, color_oscuro);
     LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 3, 20, 4, color_oscuro);
     LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 7, 24, 21, color_oscuro);
@@ -1636,6 +1736,7 @@ static void Game_DibujarBoss(void)
   }
   else if (indice == 1U)
   {
+    //Boss con cara enojada
     LCD_Llenar_Rect(boss_x + 8, BOSS_Y, 16, 3, color_oscuro);
     LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 3, 24, 4, color_oscuro);
     LCD_Llenar_Rect(boss_x + 2, BOSS_Y + 7, 28, 25, color_oscuro);
@@ -1659,6 +1760,7 @@ static void Game_DibujarBoss(void)
   }
   else if (indice == 2U)
   {
+    //Boss bandera de Alemania
     LCD_Llenar_Rect(boss_x + 1, BOSS_Y, 3, 36, COLOR_BLANCO);
     LCD_Llenar_Rect(boss_x, BOSS_Y, 5, 3, COLOR_NEGRO);
     LCD_Llenar_Rect(boss_x + 4, BOSS_Y + 4, 28, 28, COLOR_NEGRO);
@@ -1670,6 +1772,7 @@ static void Game_DibujarBoss(void)
   }
   else
   {
+    //Boss Pacman estilo SDLG
     LCD_Llenar_Rect(boss_x + 10, BOSS_Y, 12, 3, COLOR_NEGRO);
     LCD_Llenar_Rect(boss_x + 6, BOSS_Y + 3, 20, 4, COLOR_NEGRO);
     LCD_Llenar_Rect(boss_x + 3, BOSS_Y + 7, 26, 5, COLOR_NEGRO);
@@ -1691,6 +1794,7 @@ static void Game_DibujarBoss(void)
   }
 }
 
+//Dibuja vida del boss
 static void Game_DibujarVidaBoss(void)
 {
   uint8_t indice = Game_IndiceBoss();
@@ -1704,6 +1808,7 @@ static void Game_DibujarVidaBoss(void)
   LCD_Llenar_Rect(60, 9, ancho, 8, colores_boss_claro[indice]);
 }
 
+//Dibuja vida del jugador
 static void Game_DibujarVidaJugador(void)
 {
   uint16_t fondo = colores_pantalla[pantalla_actual];
@@ -1721,6 +1826,7 @@ static void Game_DibujarVidaJugador(void)
   }
 }
 
+//Dibuja proyectil del jugador
 static void Game_DibujarDisparo(void)
 {
   if (disparo_activo)
@@ -1730,6 +1836,7 @@ static void Game_DibujarDisparo(void)
   }
 }
 
+//Dibuja pistola inicial
 static void Game_DibujarPistola(void)
 {
   if ((pantalla_actual != 0U) || tiene_pistola)
@@ -1742,6 +1849,7 @@ static void Game_DibujarPistola(void)
   LCD_Llenar_Rect(PISTOLA_X + 4, PISTOLA_Y + 4, 5, 5, COLOR_JUGADOR_DARK);
 }
 
+//Restaura disparo anterior
 static void Game_BorrarDisparo(int16_t x, int16_t y)
 {
   Game_RestaurarFondo(x, y, DISPARO_ANCHO, DISPARO_ALTO);
@@ -1757,6 +1865,7 @@ static void Game_BorrarDisparo(int16_t x, int16_t y)
   Game_DibujarPistola();
 }
 
+//Actualiza disparo del jugador
 static void Game_ActualizarDisparo(bool disparar)
 {
   if (disparo_activo)
@@ -1790,6 +1899,7 @@ static void Game_ActualizarDisparo(bool disparar)
   Game_DibujarDisparo();
 }
 
+//Actualiza combate del boss
 static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
 {
   int16_t boss_x_anterior = boss_x;
@@ -1800,6 +1910,7 @@ static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
 
   *golpeado = false;
 
+  //Borrar posiciones anteriores
   LCD_Llenar_Rect(boss_x_anterior, BOSS_Y, BOSS_ANCHO, BOSS_ALTO, fondo);
   if (disparo_anterior)
   {
@@ -1807,6 +1918,7 @@ static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
                     DISPARO_ANCHO, DISPARO_ALTO, fondo);
   }
 
+  //Mover boss horizontalmente
   boss_x = (int16_t)(boss_x + (boss_direccion * BOSS_SPEED));
   if (boss_x <= 12)
   {
@@ -1819,12 +1931,14 @@ static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
     boss_direccion = -1;
   }
 
+  //Actualizar ataques enemigos
   *golpeado = Game_ActualizarDisparosBoss();
   if (*golpeado)
   {
     return false;
   }
 
+  //Procesar disparo aliado
   if (disparar)
   {
     Game_IniciarDisparo();
@@ -1841,6 +1955,7 @@ static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
         (disparo_y < (BOSS_Y + BOSS_ALTO)))
     {
       disparo_activo = false;
+      //Reducir vida del boss
       if (boss_vida > 0U)
       {
         boss_vida--;
@@ -1848,6 +1963,7 @@ static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
 
       if (boss_vida == 0U)
       {
+        //Marcar boss derrotado
         bosses_derrotados[Game_IndiceBoss()] = true;
         Game_LimpiarDisparosBoss();
         return true;
@@ -1866,12 +1982,14 @@ static bool Game_ActualizarBoss(bool disparar, bool *golpeado)
   return false;
 }
 
+//Monta sistema de archivos
 static bool SD_Init(void)
 {
   sd_lista = f_mount(&sd_fatfs, "0:", 1U) == FR_OK;
   return sd_lista;
 }
 
+//Cierra archivo de fondo
 static void SD_CerrarFondo(void)
 {
   if (fondo_abierto)
@@ -1882,6 +2000,7 @@ static void SD_CerrarFondo(void)
   }
 }
 
+//Abre fondo desde SD
 static bool SD_AbrirFondo(uint8_t indice)
 {
   char nombre[] = "0:/FONDO01.BIN";
@@ -1897,6 +2016,7 @@ static bool SD_AbrirFondo(uint8_t indice)
   }
 
   SD_CerrarFondo();
+  //Construir nombre del archivo
   indice++;
   nombre[8] = (char)('0' + (indice / 10U));
   nombre[9] = (char)('0' + (indice % 10U));
@@ -1906,6 +2026,7 @@ static bool SD_AbrirFondo(uint8_t indice)
     return false;
   }
 
+  //Validar tamaño exacto
   if (f_size(&fondo_archivo) != FONDO_TAMANO_BYTES)
   {
     f_close(&fondo_archivo);
@@ -1917,9 +2038,11 @@ static bool SD_AbrirFondo(uint8_t indice)
   return true;
 }
 
+//Dibuja región desde SD
 static bool SD_DibujarRegion(uint8_t indice, int16_t x, int16_t y,
                             int16_t ancho, int16_t alto)
 {
+  //Recortar región visible
   int16_t x0 = (x < 0) ? 0 : x;
   int16_t y0 = (y < 0) ? 0 : y;
   int16_t x1 = ((x + ancho) > LCD_ANCHO) ? LCD_ANCHO : (x + ancho);
@@ -1938,6 +2061,7 @@ static bool SD_DibujarRegion(uint8_t indice, int16_t x, int16_t y,
   LCD_CS_LOW();
   LCD_RS_DATA();
 
+  //Leer filas solicitadas
   for (int16_t fila = y0; fila < y1; fila++)
   {
     FSIZE_t posicion = ((FSIZE_t)fila * LCD_ANCHO + (FSIZE_t)x0) * 2U;
@@ -1964,20 +2088,24 @@ static bool SD_DibujarRegion(uint8_t indice, int16_t x, int16_t y,
   return true;
 }
 
+//Calcula fondo correspondiente
 static uint8_t Game_IndiceFondo(void)
 {
   return (uint8_t)(pantalla_actual - (pantalla_actual / 4U));
 }
 
+//Restaura región del fondo
 static void Game_RestaurarFondo(int16_t x, int16_t y, int16_t ancho, int16_t alto)
 {
   if (Game_EsPantallaBoss() ||
       !SD_DibujarRegion(Game_IndiceFondo(), x, y, ancho, alto))
   {
+    //Usar color de respaldo
     LCD_Llenar_Rect(x, y, ancho, alto, colores_pantalla[pantalla_actual]);
   }
 }
 
+//Dibuja escenario completo
 static void Game_DibujarFondo(void)
 {
   bool fondo_dibujado = false;
@@ -2022,6 +2150,7 @@ static void Game_DibujarFondo(void)
   }
 }
 
+//Selecciona sprite actual
 static const uint16_t *Game_SpriteJugador(void)
 {
   if (salto_cargando)
@@ -2037,6 +2166,7 @@ static const uint16_t *Game_SpriteJugador(void)
   return sprite_idle_derecha;
 }
 
+//Dibuja sprite transparente
 static void LCD_DibujarSpriteJugador(int16_t x, int16_t y,
                                      const uint16_t *sprite, bool derecha)
 {
@@ -2122,11 +2252,13 @@ static void LCD_DibujarSpriteJugador(int16_t x, int16_t y,
   }
 }
 
+//Dibuja personaje principal
 static void Game_DibujarJugador(int16_t x, int16_t y)
 {
   LCD_DibujarSpriteJugador(x, y, Game_SpriteJugador(), jugador_mira_derecha);
 }
 
+//Restaura posición anterior
 static void Game_BorrarJugador(int16_t x, int16_t y)
 {
   Game_RestaurarFondo(x, y, JUGADOR_ANCHO, JUGADOR_ALTO);
@@ -2159,9 +2291,11 @@ static void Game_BorrarJugador(int16_t x, int16_t y)
 
 }
 
+//Prepara una partida
 static void Game_Iniciar(uint8_t pantalla_inicial, bool pistola_inicial)
 {
   Audio_Detener();
+  //Configurar pantalla inicial
   pantalla_actual = (pantalla_inicial < TOTAL_PANTALLAS) ?
                     pantalla_inicial : 0U;
   jugador.x = (LCD_ANCHO - JUGADOR_ANCHO) / 2;
@@ -2176,6 +2310,7 @@ static void Game_Iniciar(uint8_t pantalla_inicial, bool pistola_inicial)
   jugador_frame = 0U;
   jugador_mira_derecha = true;
   proximo_frame_caminata = HAL_GetTick() + WALK_FRAME_MS;
+  //Reiniciar progreso de bosses
   memset(bosses_derrotados, 0, sizeof(bosses_derrotados));
   for (uint8_t i = 0U; i < (pantalla_actual / 4U); i++)
   {
@@ -2194,6 +2329,7 @@ static void Game_Iniciar(uint8_t pantalla_inicial, bool pistola_inicial)
   vida_jugador = 0U;
   salto_en_curso = false;
 
+  //Preparar boss seleccionado
   if (Game_BossActivo())
   {
     Game_BossInit();
@@ -2203,11 +2339,13 @@ static void Game_Iniciar(uint8_t pantalla_inicial, bool pistola_inicial)
   Game_DibujarJugador(jugador.x, (int16_t)(jugador.y_fp >> FP_SHIFT));
 }
 
+//Inicia desde principio
 static void Game_Init(void)
 {
   Game_Iniciar(0U, false);
 }
 
+//Inicia boss seleccionado
 static void Game_InitBoss(uint8_t indice)
 {
   if (indice >= TOTAL_BOSSES)
@@ -2218,6 +2356,7 @@ static void Game_InitBoss(uint8_t indice)
   Game_Iniciar((uint8_t)((indice * 4U) + 3U), true);
 }
 
+//Actualiza lógica principal
 static void Game_Update(void)
 {
   uint8_t control = Control_Leer();
@@ -2237,6 +2376,7 @@ static void Game_Update(void)
   bool estaba_en_suelo = jugador.on_ground;
   int16_t movimiento_x = 0;
 
+  //Detectar solicitud de pausa
   if (pause_pressed && !pause_anterior)
   {
     Pausa_Init();
@@ -2246,6 +2386,7 @@ static void Game_Update(void)
   pause_anterior = pause_pressed;
   shoot_anterior = shoot_pressed;
 
+  //Controlar movimiento horizontal
   if (Game_BossActivo())
   {
     jugador.vx = 0;
@@ -2283,6 +2424,7 @@ static void Game_Update(void)
 
   int16_t destino_x = old_x + movimiento_x;
 
+  //Limitar bordes laterales
   if (destino_x < 0)
   {
     destino_x = 0;
@@ -2294,6 +2436,7 @@ static void Game_Update(void)
     colision_pared = true;
   }
 
+  //Resolver choques laterales
   jugador.x = Game_ResolverHorizontal(old_x, destino_x, old_y);
   if (colision_pared)
   {
@@ -2322,6 +2465,7 @@ static void Game_Update(void)
   bool caminando = jugador.x != old_x;
   uint32_t ahora = HAL_GetTick();
 
+  //Actualizar animación visual
   if (caminando)
   {
     if ((int32_t)(ahora - proximo_frame_caminata) >= 0)
@@ -2336,6 +2480,7 @@ static void Game_Update(void)
     proximo_frame_caminata = ahora + WALK_FRAME_MS;
   }
 
+  //Detectar caída libre
   if (jugador.on_ground && !Game_TieneSoporte(jugador.x, old_y))
   {
     jugador.on_ground = false;
@@ -2359,6 +2504,7 @@ static void Game_Update(void)
     }
   }
 
+  //Calcular potencia del salto
   if (salto_cargando)
   {
     uint32_t carga = ahora - salto_inicio;
@@ -2407,6 +2553,7 @@ static void Game_Update(void)
 
   jump_apachado = jump_pressed;
 
+  //Aplicar gravedad vertical
   if (!jugador.on_ground)
   {
     jugador.vy_fp += GRAVEDAD_FP;
@@ -2430,6 +2577,7 @@ static void Game_Update(void)
     }
   }
 
+  //Detectar aterrizaje final
   if (!estaba_en_suelo && jugador.on_ground && salto_en_curso)
   {
     Audio_EfectoAterrizaje();
@@ -2438,6 +2586,7 @@ static void Game_Update(void)
 
   int16_t new_y = (int16_t)(jugador.y_fp >> FP_SHIFT);
 
+  //Recoger pistola inicial
   if (Game_JugadorTocaPistola(jugador.x, new_y))
   {
     tiene_pistola = true;
@@ -2447,6 +2596,7 @@ static void Game_Update(void)
     return;
   }
 
+  //Procesar combate activo
   if (Game_BossActivo())
   {
     bool golpeado = false;
@@ -2460,6 +2610,7 @@ static void Game_Update(void)
 
     if (golpeado)
     {
+      //Reducir vida del jugador
       if (vida_jugador > 0U)
       {
         vida_jugador--;
@@ -2467,6 +2618,7 @@ static void Game_Update(void)
 
       if (vida_jugador == 0U)
       {
+        //Reiniciar tras morir
         estado_actual = ESTADO_JUEGO;
         Game_Init();
         return;
@@ -2488,6 +2640,7 @@ static void Game_Update(void)
     }
   }
 
+  //Cambiar entre pantallas
   if ((new_y + JUGADOR_ALTO) < 0)
   {
     if (pantalla_actual < (TOTAL_PANTALLAS - 1U))
@@ -2545,6 +2698,7 @@ static void Game_Update(void)
     return;
   }
 
+  //Redibujar jugador cambiado
   if ((jugador.x != old_x) || (new_y != old_y) ||
       (jugador_frame != old_frame) ||
       (jugador_mira_derecha != old_direccion) ||
@@ -2555,6 +2709,7 @@ static void Game_Update(void)
     Game_DibujarJugador(jugador.x, new_y);
   }
 
+  //Actualizar disparos restantes
   if (!Game_BossActivo())
   {
     Game_ActualizarDisparo(disparar);
@@ -2598,14 +2753,17 @@ int main(void)
   MX_SPI1_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
+  //Iniciar audio y control
   Audio_Init();
   Control_Iniciar();
 
   //Deseleccionar los dispositivos SPI
   HAL_GPIO_WritePin(F_CS_GPIO_Port, F_CS_Pin, GPIO_PIN_SET);
   HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
+  //Montar tarjeta microSD
   SD_Init();
 
+  //Preparar pantalla principal
   LCD_HardwareReset();
 
   LCD_InitPantalla();
@@ -2620,10 +2778,12 @@ int main(void)
   {
     uint32_t now = HAL_GetTick();
 
+    //Actualizar secuencia de audio
     Audio_Update();
 
     if ((int32_t)(now - next_frame) >= 0)
     {
+      //Procesar estado actual
       if (estado_actual == ESTADO_MENU)
       {
         Menu_Update();

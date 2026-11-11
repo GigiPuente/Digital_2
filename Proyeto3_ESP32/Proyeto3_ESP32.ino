@@ -36,9 +36,9 @@
 // ================== 1. CONFIGURACION ==================
 // true = simulacion desde la web (sin necesidad de tener Nucleos conectadas)
 // false = lee sensores reales de AMBAS Nucleos por I2C
-constexpr bool MODO_SIMULACION = true;
+constexpr bool MODO_SIMULACION = false;
 
-const char* WIFI_SSID = "iPhone 18 Pro Max de Deyler";
+const char* WIFI_SSID = "NOMBRE_DE_TU_WIFI";
 const char* WIFI_PASSWORD = "holahola";
 const char* AP_SSID = "ParqueoMatic";
 const char* AP_PASSWORD = "ParqueoMatic26";
@@ -48,7 +48,7 @@ constexpr uint8_t SCL_ESP = 22;
 constexpr uint8_t DIR_NUCLEO_TFT = 0x31;  // P1..P4
 constexpr uint8_t DIR_NUCLEO_7SEG = 0x32; // P5..P8
 constexpr uint32_t VELOCIDAD_I2C = 100000;
-constexpr uint32_t PERIODO_I2C_MS = 150;  // ~6.7 consultas/segundo
+constexpr uint32_t PERIODO_I2C_MS = 100;
 constexpr uint32_t TIMEOUT_NUCLEO_MS = 1500;
 constexpr uint8_t CAB_LOCAL = 0x5A;
 constexpr uint8_t CAB_GLOBAL = 0xA5;
@@ -66,6 +66,8 @@ uint32_t ultimaRespuestaB = 0;
 bool haRespondidoA = false;
 bool haRespondidoB = false;
 uint32_t ultimaConsulta = 0;
+bool wifiEstacionPendiente = false;
+uint32_t wifiInicio = 0;
 
 // ================== 2. WEB INTEGRADA ==================
 const char PAGINA_WEB[] PROGMEM = R"HTML(
@@ -226,7 +228,7 @@ sockets.broadcastTXT(mensaje);
 // ================== 4. I2C MAESTRO ==================
 bool leerCuatroParqueos(uint8_t direccion, uint8_t &mascaraLocal) {
   // La Nucleo responde cuando el maestro hace una lectura de 3 bytes.
-  const uint8_t n = Wire.requestFrom(direccion, (uint8_t)3, true);
+  const size_t n = Wire.requestFrom(direccion, (size_t)3, true);
   if (n != 3 || Wire.available() < 3) {
     while (Wire.available()) Wire.read();
     return false;
@@ -309,35 +311,46 @@ void iniciarServidor() {
 }
 
 // ================== 6. WIFI ==================
+void iniciarPuntoAcceso() {
+  WiFi.mode(WIFI_AP);
+  if (WiFi.softAP(AP_SSID, AP_PASSWORD)) {
+    Serial.print("[WiFi] Red: "); Serial.println(AP_SSID);
+    Serial.print("[WEB] http://"); Serial.println(WiFi.softAPIP());
+  } else {
+    Serial.println("[WiFi] ERROR iniciando punto de acceso");
+  }
+}
+
 void iniciarWiFi() {
-  const bool configurado = String(WIFI_SSID)!="NOMBRE_DE_TU_WIFI";
-  if(configurado) {
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID,WIFI_PASSWORD);
-    Serial.printf("[WiFi] Conectando a %s",WIFI_SSID);
-    uint32_t desde=millis();
-    while(WiFi.status()!=WL_CONNECTED && (uint32_t)(millis()-desde)<12000) {
-      delay(250);Serial.print(".");
-    }
-    Serial.println();
-    if(WiFi.status()==WL_CONNECTED) {
-      Serial.print("[WEB] http://");Serial.println(WiFi.localIP());
-      return;
-    }
+  if (String(WIFI_SSID) == "NOMBRE_DE_TU_WIFI") {
+    iniciarPuntoAcceso();
+    return;
+  }
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  wifiEstacionPendiente = true;
+  wifiInicio = millis();
+  Serial.printf("[WiFi] Conectando a %s\n", WIFI_SSID);
+}
+
+void actualizarWiFi() {
+  if (!wifiEstacionPendiente) return;
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiEstacionPendiente = false;
+    Serial.print("[WEB] http://"); Serial.println(WiFi.localIP());
+    return;
+  }
+  if ((uint32_t)(millis() - wifiInicio) >= 12000U) {
+    wifiEstacionPendiente = false;
     WiFi.disconnect(true);
     Serial.println("[WiFi] No disponible; creando red propia");
+    iniciarPuntoAcceso();
   }
-  WiFi.mode(WIFI_AP);
-  if(WiFi.softAP(AP_SSID,AP_PASSWORD)) {
-    Serial.print("[WiFi] Red: ");Serial.println(AP_SSID);
-    Serial.print("[WEB] http://");Serial.println(WiFi.softAPIP());
-  } else Serial.println("[WiFi] ERROR iniciando punto de acceso");
 }
 
 // ================== 7. SETUP / LOOP ==================
 void setup() {
   Serial.begin(115200);
-  delay(250);
   Serial.println("\n=== PARQUEO-MATIC V2 | ESP32 MAESTRO ===");
   Serial.printf("Modo: %s\n",MODO_SIMULACION ? "SIMULACION" : "REAL");
 
@@ -356,7 +369,7 @@ void setup() {
 
 void loop() {
   actualizarI2C();
+  actualizarWiFi();
   servidor.handleClient();
   sockets.loop();
-  delay(2);
 }

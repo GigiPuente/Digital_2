@@ -1,3 +1,4 @@
+
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -36,6 +37,12 @@
 #define LCD_MADCTL  0x28U  //Horizontal. Usar 0xE8 para girar 180 grados.
 #define LDR_LIGHT_ON   3000U
 #define LDR_LIGHT_OFF  2600U
+#define I2C_A_ADDRESS 0x31U
+#define NEOPIXEL_COUNT 4U
+#define NEOPIXEL_RESET_SLOTS 240U
+#define NEOPIXEL_ZERO 34U
+#define NEOPIXEL_ONE 68U
+#define NEOPIXEL_FRAME_SIZE (NEOPIXEL_COUNT * 24U + NEOPIXEL_RESET_SLOTS)
 
 #define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8U) << 8) | \
                                    (((g) & 0xFCU) << 3) | \
@@ -59,12 +66,23 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 DMA_HandleTypeDef hdma_adc1;
+I2C_HandleTypeDef hi2c1;
+TIM_HandleTypeDef htim3;
+DMA_HandleTypeDef hdma_tim3_ch4_up;
 
 /* USER CODE BEGIN PV */
-//Los cuatro primeros espacios usan LDR; P5 a P8 permanecen vacios.
-static uint8_t parkingOccupied[8] = {0U};
+//P1 a P4 usan LDR; P5 a P8 reciben su estado del ESP32.
+static volatile uint8_t parkingOccupied[8] = {0U};
 //DMA escribe lecturas de 12 bits en este arreglo de medias palabras.
 static volatile uint16_t ldrRaw[4] = {0U};
+//Cada valor indica la duracion en alto de un bit; al final van 300 us en bajo.
+static uint16_t neopixelFrame[NEOPIXEL_FRAME_SIZE] = {0U};
+static volatile uint8_t neopixelFinished = 0U;
+//El ESP32 lee tres bytes y escribe cuatro bytes con los ocho espacios.
+static uint8_t i2cLocal[3] = {0x5AU, 0U, 0x5AU};
+static uint8_t i2cGlobalRx[4] = {0U};
+static volatile uint32_t i2cGlobalFrame = 0U;
+static uint8_t i2cReady = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -72,12 +90,59 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_DMA_Init(void);
 static void MX_ADC1_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+//El primer LED corresponde a P1, el cuarto a P4; el orden de color es GRB.
+static void NeoPixel_Show(void)
+{
+  uint16_t index = 0U;
+
+  for (uint8_t slot = 0U; slot < NEOPIXEL_COUNT; ++slot)
+  {
+    uint8_t green = (parkingOccupied[slot] == 0U) ? 32U : 0U;
+    uint8_t red = (parkingOccupied[slot] == 0U) ? 0U : 32U;
+    uint32_t grb = ((uint32_t)green << 16) | ((uint32_t)red << 8);
+
+    for (uint8_t bit = 0U; bit < 24U; ++bit)
+    {
+      neopixelFrame[index++] = ((grb & (1UL << (23U - bit))) != 0U)
+                              ? NEOPIXEL_ONE : NEOPIXEL_ZERO;
+    }
+  }
+
+  while (index < NEOPIXEL_FRAME_SIZE) { neopixelFrame[index++] = 0U; }
+
+  neopixelFinished = 0U;
+  if (HAL_TIM_PWM_Start_DMA(&htim3, TIM_CHANNEL_4,
+                            (uint32_t *)neopixelFrame,
+                            (uint16_t)NEOPIXEL_FRAME_SIZE) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  uint32_t start = HAL_GetTick();
+  while (neopixelFinished == 0U)
+  {
+    if ((HAL_GetTick() - start) > 10U) { Error_Handler(); }
+  }
+
+  if (HAL_TIM_PWM_Stop_DMA(&htim3, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+void HAL_TIM_PWM_PulseFinishedCallback(TIM_HandleTypeDef *htim)
+{
+  if (htim->Instance == TIM3) { neopixelFinished = 1U; }
+}
+
 //TFT ILI9341 de 8 bits: D0=PA9, D1=PC7, D2=PA10, D3=PB3.
 //D4=PB5, D5=PB4, D6=PB10, D7=PA8.
 //RD=PA0, WR=PA1, RS=PA4, CS=PB0, RST=PC1.
@@ -322,7 +387,7 @@ static void Parking_DrawCounter(void)
   LCD_DrawText(94U, 113U, counter, C_WHITE, 2U);
 }
 
-//Lee las cuatro LDR: una lectura alta significa que hay luz.
+//Lee las cuatro LDR: al tapar un sensor, su lectura baja y el espacio se ocupa.
 static void Parking_UpdateSensors(void)
 {
   uint8_t changed = 0U;
@@ -333,10 +398,37 @@ static void Parking_UpdateSensors(void)
     uint8_t occupied = parkingOccupied[slot];
 
     //Dos umbrales evitan que el dibujo oscile con pequenas variaciones.
-    if (reading >= LDR_LIGHT_ON) { occupied = 1U; }
-    else if (reading <= LDR_LIGHT_OFF) { occupied = 0U; }
+    if (reading <= LDR_LIGHT_OFF) { occupied = 1U; }
+    else if (reading >= LDR_LIGHT_ON) { occupied = 0U; }
 
     if (occupied != parkingOccupied[slot])
+    {
+      parkingOccupied[slot] = occupied;
+      Parking_DrawSpace(slot);
+      changed = 1U;
+    }
+  }
+
+  if (changed != 0U)
+  {
+    Parking_DrawCounter();
+    NeoPixel_Show();
+  }
+}
+
+//Actualiza P5 a P8 solamente cuando el ESP32 confirma que conoce su estado.
+static void Parking_UpdateGlobal(void)
+{
+  uint32_t frame = i2cGlobalFrame;
+  uint8_t changed = 0U;
+
+  if ((frame & 0x10000UL) == 0U) { return; }
+
+  for (uint8_t slot = 4U; slot < 8U; ++slot)
+  {
+    if ((frame & (1UL << (slot + 8U))) == 0U) { continue; }
+    uint8_t occupied = ((frame & (1UL << slot)) != 0U) ? 1U : 0U;
+    if (parkingOccupied[slot] != occupied)
     {
       parkingOccupied[slot] = occupied;
       Parking_DrawSpace(slot);
@@ -401,10 +493,13 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   //Dibujar todos los espacios vacios al iniciar.
   LCD_Init();
   Parking_Draw();
+  //La pantalla arranca antes de intentar habilitar I2C.
+  MX_I2C1_Init();
   //Cada conversion ADC corresponde a PC2, PC3, PC4 y PC5, en ese orden.
   if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)ldrRaw, 4U) != HAL_OK)
   {
@@ -412,6 +507,10 @@ int main(void)
   }
   //DMA sigue en modo circular; la CPU revisa los valores cada 100 ms.
   __HAL_DMA_DISABLE_IT(&hdma_adc1, DMA_IT_HT | DMA_IT_TC);
+  //Al inicio los cuatro NeoPixel muestran los espacios libres en verde.
+  NeoPixel_Show();
+  //La direccion de esta STM32 en el bus I2C es 0x31.
+  if (i2cReady != 0U) { (void)HAL_I2C_EnableListen_IT(&hi2c1); }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -422,6 +521,12 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     Parking_UpdateSensors();
+    Parking_UpdateGlobal();
+    if ((i2cReady != 0U) &&
+        (HAL_I2C_GetState(&hi2c1) == HAL_I2C_STATE_READY))
+    {
+      (void)HAL_I2C_EnableListen_IT(&hi2c1);
+    }
     HAL_Delay(100U);
   }
   /* USER CODE END 3 */
@@ -545,6 +650,7 @@ static void MX_ADC1_Init(void)
   {
     Error_Handler();
   }
+
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
   sConfig.Channel = ADC_CHANNEL_15;
@@ -559,6 +665,69 @@ static void MX_ADC1_Init(void)
 
 }
 
+//Inicializacion de I2C1 como esclavo de 7 bits en la direccion 0x31.
+static void MX_I2C1_Init(void)
+{
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 100000U;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = (I2C_A_ADDRESS << 1);
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0x62U;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  i2cReady = (HAL_I2C_Init(&hi2c1) == HAL_OK) ? 1U : 0U;
+}
+
+//Inicializacion de TIM3 para el envio de datos a los NeoPixel.
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 0;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 112;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* USER CODE BEGIN TIM3_Init 2 */
+  //El DMA cambia el pulso despues de cada bit; el registro se aplica al siguiente.
+  TIM3->CCMR2 |= TIM_CCMR2_OC4PE;
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
+
+}
+
 /**
   * Enable DMA controller clock
   */
@@ -566,9 +735,13 @@ static void MX_DMA_Init(void)
 {
 
   /* DMA controller clock enable */
+  __HAL_RCC_DMA1_CLK_ENABLE();
   __HAL_RCC_DMA2_CLK_ENABLE();
 
   /* DMA interrupt init */
+  //Interrupcion del DMA de TIM3.
+  HAL_NVIC_SetPriority(DMA1_Stream2_IRQn, 1, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream2_IRQn);
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
@@ -659,6 +832,59 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+//Cuando el ESP32 lee, entregamos la ocupacion local de P1 a P4.
+void HAL_I2C_AddrCallback(I2C_HandleTypeDef *hi2c,
+                          uint8_t TransferDirection,
+                          uint16_t AddrMatchCode)
+{
+  (void)AddrMatchCode;
+  if (hi2c->Instance != I2C1) { return; }
+
+  if (TransferDirection == I2C_DIRECTION_TRANSMIT)
+  {
+    (void)HAL_I2C_Slave_Seq_Receive_IT(hi2c, i2cGlobalRx,
+                                        4U, I2C_FIRST_AND_LAST_FRAME);
+  }
+  else
+  {
+    uint8_t mask = 0U;
+    for (uint8_t slot = 0U; slot < 4U; ++slot)
+    {
+      if (parkingOccupied[slot] != 0U) { mask |= (uint8_t)(1U << slot); }
+    }
+    i2cLocal[0] = 0x5AU;
+    i2cLocal[1] = mask;
+    i2cLocal[2] = (uint8_t)(0x5AU ^ mask);
+    (void)HAL_I2C_Slave_Seq_Transmit_IT(hi2c, i2cLocal,
+                                         3U, I2C_FIRST_AND_LAST_FRAME);
+  }
+}
+
+//Publica la trama global verificada para actualizar la pantalla en el bucle.
+void HAL_I2C_SlaveRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  if (hi2c->Instance != I2C1) { return; }
+  if (i2cGlobalRx[0] != 0xA5U) { return; }
+  if (i2cGlobalRx[3] !=
+      (uint8_t)(0xA5U ^ i2cGlobalRx[1] ^ i2cGlobalRx[2])) { return; }
+
+  i2cGlobalFrame = 0x10000UL |
+      ((uint32_t)i2cGlobalRx[2] << 8) | i2cGlobalRx[1];
+}
+
+void HAL_I2C_ListenCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+  if (hi2c->Instance == I2C1) { (void)HAL_I2C_EnableListen_IT(hi2c); }
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c)
+{
+  if ((hi2c->Instance == I2C1) &&
+      (HAL_I2C_GetState(hi2c) == HAL_I2C_STATE_READY))
+  {
+    (void)HAL_I2C_EnableListen_IT(hi2c);
+  }
+}
 
 /* USER CODE END 4 */
 
@@ -681,7 +907,7 @@ void Error_Handler(void)
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.
   * @param  file: pointer to the source file name
-  * @param  line: Source line number
+  * @param  line: assert_param error line source number
   * @retval None
   */
 void assert_failed(uint8_t *file, uint32_t line)
@@ -692,3 +918,4 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
